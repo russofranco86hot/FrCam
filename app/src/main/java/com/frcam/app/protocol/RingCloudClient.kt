@@ -209,66 +209,29 @@ object RingCloudClient {
 
     private val activeLiveDings = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
-    /**
-     * Obtains a WebRTC signaling session ticket from Ring Cloud for real-time video/audio.
-     */
-    suspend fun requestSignalingTicket(doorbotId: Long): RingSignalingSession? = withContext(Dispatchers.IO) {
-        val accessToken = ensureValidAccessToken() ?: return@withContext null
-
-        // Wake camera if sleeping
-        wakeLiveStream(doorbotId)
-
-        val candidateEndpoints = listOf(
-            "https://api.ring.com/api/v1/clap/ticket/request/signalsocket" to """{"doorbot_id":$doorbotId}""",
-            "https://prd-api-us.prd.rings.solutions/api/v1/clap/ticket/request/signalsocket" to """{"doorbot_id":$doorbotId}""",
-            "https://api.ring.com/clients_api/ticket" to """{"ticket":{"doorbot_id":$doorbotId}}"""
-        )
-
-        for ((endpoint, body) in candidateEndpoints) {
-            try {
-                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 4000
-                    readTimeout = 4000
-                    requestMethod = "POST"
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                    setRequestProperty("User-Agent", "android:com.ringapp")
-                    setRequestProperty("hardware_id", hardwareId)
-                    outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                }
-
-                if (conn.responseCode in 200..299) {
-                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
-                    conn.disconnect()
-                    if (resp.isNotBlank()) {
-                        val json = JSONObject(resp)
-                        var ticket = json.optString("ticket")
-                        if (ticket.isBlank()) {
-                            ticket = json.optJSONObject("ticket")?.optString("ticket").orEmpty()
-                        }
-                        if (ticket.isNotBlank()) {
-                            val signalingUrl = json.optString("signaling_url").ifBlank {
-                                "wss://api.prod.signalling.ring.devices.a2z.com:443/ws?api_version=4.0&auth_type=ring_solutions&client_id=ring_site-$doorbotId&token=$ticket"
-                            }
-                            return@withContext RingSignalingSession(
-                                ticket = ticket,
-                                doorbotId = doorbotId,
-                                signalingUrl = signalingUrl
-                            )
-                        }
-                    }
-                } else {
-                    conn.disconnect()
-                }
-            } catch (_: Exception) {
-            }
-        }
-        null
-    }
-
     suspend fun wakeLiveStream(doorbotId: Long): Boolean = withContext(Dispatchers.IO) {
         val accessToken = ensureValidAccessToken() ?: return@withContext false
+        var ok = false
+
+        // 1. Primary Ring Live View trigger (POST /clients_api/doorbots/{id}/live_view)
+        try {
+            val liveViewUrl = "https://api.ring.com/clients_api/doorbots/$doorbotId/live_view"
+            val conn = (URL(liveViewUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 4000
+                readTimeout = 4000
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Authorization", "Bearer $accessToken")
+                setRequestProperty("User-Agent", "android:com.ringapp")
+                outputStream.use { it.write("{}".toByteArray()) }
+            }
+            ok = conn.responseCode in 200..299
+            conn.disconnect()
+        } catch (_: Exception) {
+        }
+
+        // 2. Secondary VOD trigger (POST /clients_api/doorbots/{id}/vod)
         try {
             val vodUrl = "https://api.ring.com/clients_api/doorbots/$doorbotId/vod"
             val conn = (URL(vodUrl).openConnection() as HttpURLConnection).apply {
@@ -279,11 +242,11 @@ object RingCloudClient {
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("Authorization", "Bearer $accessToken")
                 setRequestProperty("User-Agent", "android:com.ringapp")
-                val body = """{"api_version":"9"}"""
+                val body = """{"api_version":"11"}"""
                 outputStream.use { it.write(body.toByteArray()) }
             }
-            val ok = conn.responseCode in 200..299
-            if (ok) {
+            if (conn.responseCode in 200..299) {
+                ok = true
                 try {
                     val resp = conn.inputStream.bufferedReader().use { it.readText() }
                     if (resp.isNotBlank()) {
@@ -298,18 +261,36 @@ object RingCloudClient {
                 }
             }
             conn.disconnect()
-
-            // Trigger fresh snapshot capture from Ring Cloud
-            triggerSnapshotUpdate(doorbotId)
-
-            ok
         } catch (_: Exception) {
-            false
         }
+
+        // Trigger fresh snapshot capture from Ring Cloud
+        triggerSnapshotUpdate(doorbotId)
+
+        ok
     }
 
     suspend fun triggerSnapshotUpdate(doorbotId: Long): Boolean = withContext(Dispatchers.IO) {
         val accessToken = ensureValidAccessToken() ?: return@withContext false
+        var ok = false
+        try {
+            val tsUrl = "https://api.ring.com/clients_api/snapshots/timestamps"
+            val conn = (URL(tsUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 3000
+                readTimeout = 3000
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Authorization", "Bearer $accessToken")
+                setRequestProperty("User-Agent", "android:com.ringapp")
+                val body = """{"doorbot_ids":[$doorbotId]}"""
+                outputStream.use { it.write(body.toByteArray()) }
+            }
+            ok = conn.responseCode in 200..299
+            conn.disconnect()
+        } catch (_: Exception) {
+        }
+
         try {
             val updateUrl = "https://api.ring.com/clients_api/snapshots/update_all"
             val conn = (URL(updateUrl).openConnection() as HttpURLConnection).apply {
@@ -323,12 +304,11 @@ object RingCloudClient {
                 val body = """{"doorbot_ids":[$doorbotId],"update_all":true}"""
                 outputStream.use { it.write(body.toByteArray()) }
             }
-            val ok = conn.responseCode in 200..299
+            if (conn.responseCode in 200..299) ok = true
             conn.disconnect()
-            ok
         } catch (_: Exception) {
-            false
         }
+        ok
     }
 
     suspend fun fetchDeviceSnapshotWithMeta(doorbotId: Long): RingFrame? = withContext(Dispatchers.IO) {
@@ -364,10 +344,10 @@ object RingCloudClient {
         val now = System.currentTimeMillis()
         var bmp: Bitmap? = null
 
-        // 2. Try app-snaps endpoint: https://app-snaps.ring.com/next/{device_id} (Official Next-Gen snapshot)
+        // 1. Primary official mobile snapshot endpoint: https://api.ring.com/clients_api/snapshots/image/{device_id}
         try {
-            val appSnapsUrl = "https://app-snaps.ring.com/next/$doorbotId?_t=$now"
-            val snapConn = (URL(appSnapsUrl).openConnection() as HttpURLConnection).apply {
+            val imageUrl = "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now"
+            val conn = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 3500
                 readTimeout = 3500
                 requestMethod = "GET"
@@ -377,14 +357,39 @@ object RingCloudClient {
                 setRequestProperty("Authorization", "Bearer $accessToken")
                 setRequestProperty("User-Agent", "android:com.ringapp")
             }
-            if (snapConn.responseCode in 200..299) {
-                val bytes = snapConn.inputStream.readBytes()
+            if (conn.responseCode in 200..299) {
+                val bytes = conn.inputStream.readBytes()
                 if (bytes.isNotEmpty()) {
                     bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 }
             }
-            snapConn.disconnect()
+            conn.disconnect()
         } catch (_: Exception) {
+        }
+
+        // 2. Try app-snaps endpoint: https://app-snaps.ring.com/next/{device_id}
+        if (bmp == null) {
+            try {
+                val appSnapsUrl = "https://app-snaps.ring.com/next/$doorbotId?_t=$now"
+                val snapConn = (URL(appSnapsUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    requestMethod = "GET"
+                    useCaches = false
+                    setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
+                    setRequestProperty("Pragma", "no-cache")
+                    setRequestProperty("Authorization", "Bearer $accessToken")
+                    setRequestProperty("User-Agent", "android:com.ringapp")
+                }
+                if (snapConn.responseCode in 200..299) {
+                    val bytes = snapConn.inputStream.readBytes()
+                    if (bytes.isNotEmpty()) {
+                        bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    }
+                }
+                snapConn.disconnect()
+            } catch (_: Exception) {
+            }
         }
 
         // 3. Try official /v1/devices/{device_id}/media/image/download (Ring Media Service endpoint)
@@ -408,31 +413,6 @@ object RingCloudClient {
                     }
                 }
                 mediaConn.disconnect()
-            } catch (_: Exception) {
-            }
-        }
-
-        // 4. Fallback to clients_api snapshots with timestamp cache-buster
-        if (bmp == null) {
-            try {
-                val imageUrl = "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now"
-                val conn = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 4000
-                    readTimeout = 4000
-                    requestMethod = "GET"
-                    useCaches = false
-                    setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
-                    setRequestProperty("Pragma", "no-cache")
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                    setRequestProperty("User-Agent", "android:com.ringapp")
-                }
-                if (conn.responseCode in 200..299) {
-                    val bytes = conn.inputStream.readBytes()
-                    if (bytes.isNotEmpty()) {
-                        bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    }
-                }
-                conn.disconnect()
             } catch (_: Exception) {
             }
         }
@@ -481,7 +461,30 @@ object RingCloudClient {
                 }
             }
 
-            // 2. Query doorbots history - using official Ring endpoint /clients_api/doorbots/history
+            // 2. Query doorbots history for specific camera (POST/GET clients_api/doorbots/{doorbotId}/history)
+            if (dingId == null || dingId <= 0L) {
+                try {
+                    val historyUrl = "https://api.ring.com/clients_api/doorbots/$doorbotId/history?limit=10"
+                    val hConn = (URL(historyUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 3500
+                        readTimeout = 3500
+                        requestMethod = "GET"
+                        setRequestProperty("Authorization", "Bearer $accessToken")
+                        setRequestProperty("User-Agent", "android:com.ringapp")
+                    }
+                    if (hConn.responseCode in 200..299) {
+                        val hBody = hConn.inputStream.bufferedReader().use { it.readText() }
+                        val hArray = org.json.JSONArray(hBody)
+                        if (hArray.length() > 0) {
+                            dingId = hArray.getJSONObject(0).optLong("id", 0L).takeIf { it > 0 }
+                        }
+                    }
+                    hConn.disconnect()
+                } catch (_: Exception) {
+                }
+            }
+
+            // 3. Fallback to general doorbots history
             if (dingId == null || dingId <= 0L) {
                 try {
                     val historyUrl = "https://api.ring.com/clients_api/doorbots/history?limit=15"
@@ -516,32 +519,35 @@ object RingCloudClient {
             val targetDingId = dingId ?: return@withContext null
             if (targetDingId <= 0L) return@withContext null
 
-            // 3. Request recording URL (handles 302 redirect or JSON response to pre-signed S3 .mp4)
-            val recUrl = "https://api.ring.com/clients_api/dings/$targetDingId/recording?api_version=9"
-            val rConn = (URL(recUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 4000
-                readTimeout = 4000
-                requestMethod = "GET"
-                instanceFollowRedirects = false
-                setRequestProperty("Authorization", "Bearer $accessToken")
-                setRequestProperty("User-Agent", "android:com.ringapp")
-            }
-            var redirectLoc = rConn.getHeaderField("Location")
-            if (redirectLoc.isNullOrBlank() && rConn.responseCode in 200..299) {
-                val body = rConn.inputStream.bufferedReader().use { it.readText() }
+            // 4. Request recording URL (handles 302 redirect or JSON response to pre-signed S3 .mp4)
+            for (apiVersion in listOf("11", "9")) {
                 try {
-                    val j = JSONObject(body)
-                    redirectLoc = j.optString("url").ifBlank { null }
+                    val recUrl = "https://api.ring.com/clients_api/dings/$targetDingId/recording?api_version=$apiVersion"
+                    val rConn = (URL(recUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 4000
+                        readTimeout = 4000
+                        requestMethod = "GET"
+                        instanceFollowRedirects = false
+                        setRequestProperty("Authorization", "Bearer $accessToken")
+                        setRequestProperty("User-Agent", "android:com.ringapp")
+                    }
+                    var redirectLoc = rConn.getHeaderField("Location")
+                    if (redirectLoc.isNullOrBlank() && rConn.responseCode in 200..299) {
+                        val body = rConn.inputStream.bufferedReader().use { it.readText() }
+                        try {
+                            val j = JSONObject(body)
+                            redirectLoc = j.optString("url").ifBlank { null }
+                        } catch (_: Exception) {
+                        }
+                    }
+                    rConn.disconnect()
+                    if (!redirectLoc.isNullOrBlank()) {
+                        return@withContext redirectLoc
+                    }
                 } catch (_: Exception) {
                 }
             }
-            rConn.disconnect()
-
-            if (!redirectLoc.isNullOrBlank()) {
-                redirectLoc
-            } else {
-                null
-            }
+            null
         } catch (_: Exception) {
             null
         }
