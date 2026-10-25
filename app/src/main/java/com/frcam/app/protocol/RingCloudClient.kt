@@ -209,6 +209,64 @@ object RingCloudClient {
 
     private val activeLiveDings = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
+    /**
+     * Obtains a WebRTC signaling session ticket from Ring Cloud for real-time video/audio.
+     */
+    suspend fun requestSignalingTicket(doorbotId: Long): RingSignalingSession? = withContext(Dispatchers.IO) {
+        val accessToken = ensureValidAccessToken() ?: return@withContext null
+
+        // Wake camera if sleeping
+        wakeLiveStream(doorbotId)
+
+        val candidateEndpoints = listOf(
+            "https://api.ring.com/api/v1/clap/ticket/request/signalsocket" to """{"doorbot_id":$doorbotId}""",
+            "https://prd-api-us.prd.rings.solutions/api/v1/clap/ticket/request/signalsocket" to """{"doorbot_id":$doorbotId}""",
+            "https://api.ring.com/clients_api/ticket" to """{"ticket":{"doorbot_id":$doorbotId}}"""
+        )
+
+        for ((endpoint, body) in candidateEndpoints) {
+            try {
+                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    setRequestProperty("Authorization", "Bearer $accessToken")
+                    setRequestProperty("User-Agent", "android:com.ringapp")
+                    setRequestProperty("hardware_id", hardwareId)
+                    outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                }
+
+                if (conn.responseCode in 200..299) {
+                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                    conn.disconnect()
+                    if (resp.isNotBlank()) {
+                        val json = JSONObject(resp)
+                        var ticket = json.optString("ticket")
+                        if (ticket.isBlank()) {
+                            ticket = json.optJSONObject("ticket")?.optString("ticket").orEmpty()
+                        }
+                        if (ticket.isNotBlank()) {
+                            val signalingUrl = json.optString("signaling_url").ifBlank {
+                                "wss://api.prod.signalling.ring.devices.a2z.com:443/ws?api_version=4.0&auth_type=ring_solutions&client_id=ring_site-$doorbotId&token=$ticket"
+                            }
+                            return@withContext RingSignalingSession(
+                                ticket = ticket,
+                                doorbotId = doorbotId,
+                                signalingUrl = signalingUrl
+                            )
+                        }
+                    }
+                } else {
+                    conn.disconnect()
+                }
+            } catch (_: Exception) {
+            }
+        }
+        null
+    }
+
     suspend fun wakeLiveStream(doorbotId: Long): Boolean = withContext(Dispatchers.IO) {
         val accessToken = ensureValidAccessToken() ?: return@withContext false
         try {

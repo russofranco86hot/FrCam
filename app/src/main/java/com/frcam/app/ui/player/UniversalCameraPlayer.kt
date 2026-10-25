@@ -12,6 +12,10 @@ import android.util.Base64
 import android.view.Surface
 import android.view.TextureView
 import android.view.ViewGroup
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.annotation.OptIn
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -81,6 +85,10 @@ import com.frcam.app.model.StreamProtocol
 import com.frcam.app.model.TransportMode
 import com.frcam.app.protocol.NetworkCameraScanner
 import com.frcam.app.protocol.RingCloudClient
+import com.frcam.app.protocol.RingSignalingSession
+import com.frcam.app.protocol.RingWebRtcBridge
+import com.frcam.app.protocol.RingWebRtcController
+import com.frcam.app.protocol.RingWebRtcHtmlBuilder
 import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -416,13 +424,13 @@ private fun RingCloudStreamSurface(
     onManualRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var webrtcSession by remember(camera.id, retryKey) { mutableStateOf<RingSignalingSession?>(null) }
+    var webrtcFailed by remember(camera.id, retryKey) { mutableStateOf(false) }
     var activeRecordingUrl by remember(camera.id, retryKey) { mutableStateOf<String?>(null) }
     var rawFrame by remember(camera.id, retryKey) { mutableStateOf<Bitmap?>(null) }
     var currentFrame by remember(camera.id, retryKey) { mutableStateOf<Bitmap?>(null) }
     var streamState by remember(camera.id, retryKey) { mutableStateOf(StreamState.CONNECTING) }
-    var statusText by remember(camera.id, retryKey) { mutableStateOf("Conectando a Ring Cloud...") }
-    var lastRingTimestampMs by remember(camera.id, retryKey) { mutableLongStateOf(0L) }
-    var frameSequence by remember(camera.id, retryKey) { mutableIntStateOf(0) }
+    var statusText by remember(camera.id, retryKey) { mutableStateOf("Conectando con Ring WebRTC Live...") }
 
     // Live continuous clock running second by second
     var liveClockMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -452,12 +460,19 @@ private fun RingCloudStreamSurface(
             return@LaunchedEffect
         }
         streamState = StreamState.CONNECTING
-        statusText = "Iniciando transmisión en vivo Ring ($doorbotId)..."
+        statusText = "Iniciando WebRTC en vivo Ring ($doorbotId)..."
 
-        // 1. Send VOD wakeup call to Ring cloud
-        RingCloudClient.wakeLiveStream(doorbotId)
+        // 1. Try to obtain Ring WebRTC Signaling session ticket
+        val session = RingCloudClient.requestSignalingTicket(doorbotId)
+        if (session != null) {
+            webrtcSession = session
+            return@LaunchedEffect
+        }
 
-        // 2. Query for actual recording clip URL from Ring Cloud
+        // 2. Fallback to snapshot & recording clip if WebRTC ticket could not be obtained
+        webrtcFailed = true
+        statusText = "WebRTC no disponible, conectando por Cloud Snapshot/VOD..."
+
         val recUrl = RingCloudClient.fetchLatestRecordingUrl(doorbotId)
         if (!recUrl.isNullOrBlank()) {
             activeRecordingUrl = recUrl
@@ -465,10 +480,8 @@ private fun RingCloudStreamSurface(
             streamState = StreamState.LIVE
         }
 
-        // 3. Live motion streaming & snapshot loop
         var fetchCount = 0
         while (isActive) {
-            // Check for live video clip from Ring VOD/Cloud if not yet active
             if (activeRecordingUrl.isNullOrBlank()) {
                 val rec = RingCloudClient.fetchLatestRecordingUrl(doorbotId)
                 if (!rec.isNullOrBlank()) {
@@ -478,7 +491,6 @@ private fun RingCloudStreamSurface(
                 }
             }
 
-            // If video clip is not yet ready, fetch fresh live snapshot frame
             if (activeRecordingUrl.isNullOrBlank()) {
                 val ringFrame = RingCloudClient.fetchDeviceSnapshotWithMeta(doorbotId)
                 if (ringFrame != null) {
@@ -487,8 +499,6 @@ private fun RingCloudStreamSurface(
                         onResolution("${bmp.width}x${bmp.height} (Ring Live)")
                     }
                     rawFrame = bmp
-                    lastRingTimestampMs = ringFrame.ringTimestampMs
-                    frameSequence++
                     streamState = StreamState.LIVE
                 } else if (rawFrame == null) {
                     streamState = StreamState.ERROR
@@ -513,7 +523,26 @@ private fun RingCloudStreamSurface(
     }
 
     Box(modifier = modifier) {
-        if (!activeRecordingUrl.isNullOrBlank()) {
+        val activeSession = webrtcSession
+        if (activeSession != null && !webrtcFailed) {
+            RingWebRtcPlayerView(
+                camera = camera,
+                session = activeSession,
+                isMuted = isMuted,
+                onLive = { res ->
+                    streamState = StreamState.LIVE
+                    onResolution(res)
+                },
+                onError = { err ->
+                    webrtcFailed = true
+                    statusText = err
+                },
+                onFrame = { bmp ->
+                    rawFrame = bmp
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else if (!activeRecordingUrl.isNullOrBlank()) {
             ExoRtspStreamSurface(
                 streamUrl = activeRecordingUrl!!,
                 forceTcp = false,
@@ -571,14 +600,16 @@ private fun RingCloudStreamSurface(
                 .padding(horizontal = 8.dp, vertical = 4.dp)
         ) {
             Text(
-                text = if (!activeRecordingUrl.isNullOrBlank()) "RING VIDEO HD" else "RING CLOUD",
+                text = if (webrtcSession != null && !webrtcFailed) "RING WEBRTC LIVE"
+                       else if (!activeRecordingUrl.isNullOrBlank()) "RING VIDEO HD"
+                       else "RING CLOUD",
                 color = Color(0xFF38BDF8),
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold
             )
         }
 
-        if (activeRecordingUrl.isNullOrBlank() && currentFrame == null) {
+        if (webrtcSession == null && activeRecordingUrl.isNullOrBlank() && currentFrame == null) {
             StreamOverlayState(
                 streamState = streamState,
                 streamUrl = "Ring Cloud (${camera.deviceId})",
@@ -587,6 +618,81 @@ private fun RingCloudStreamSurface(
             )
         }
     }
+}
+
+@Composable
+private fun RingWebRtcPlayerView(
+    camera: CameraConfig,
+    session: RingSignalingSession,
+    isMuted: Boolean,
+    onLive: (String) -> Unit,
+    onError: (String) -> Unit,
+    onFrame: (Bitmap) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+
+    LaunchedEffect(isMuted) {
+        RingWebRtcController.setSpeakerMuted(isMuted)
+    }
+
+    DisposableEffect(camera.id) {
+        onDispose {
+            RingWebRtcController.unregisterSession(camera.id)
+            webViewInstance?.destroy()
+            webViewInstance = null
+        }
+    }
+
+    AndroidView(
+        modifier = modifier.fillMaxSize(),
+        factory = { ctx ->
+            WebView(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setBackgroundColor(android.graphics.Color.BLACK)
+
+                settings.apply {
+                    javaScriptEnabled = true
+                    mediaPlaybackRequiresUserGesture = false
+                    domStorageEnabled = true
+                    allowFileAccess = true
+                    allowContentAccess = true
+                    loadWithOverviewMode = true
+                    useWideViewPort = true
+                }
+
+                webChromeClient = object : WebChromeClient() {
+                    override fun onPermissionRequest(request: PermissionRequest?) {
+                        try {
+                            request?.grant(request.resources)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+
+                webViewClient = object : WebViewClient() {}
+
+                val bridge = RingWebRtcBridge(
+                    onLive = onLive,
+                    onError = onError,
+                    onFrame = onFrame
+                )
+                addJavascriptInterface(bridge, "AndroidBridge")
+
+                RingWebRtcController.registerSession(camera.id, this)
+                webViewInstance = this
+
+                val html = RingWebRtcHtmlBuilder.buildHtml(session, isMuted)
+                loadDataWithBaseURL("https://api.ring.com", html, "text/html", "UTF-8", null)
+            }
+        },
+        update = { wv ->
+            webViewInstance = wv
+        }
+    )
 }
 
 @Composable

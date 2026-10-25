@@ -341,8 +341,7 @@ data class CameraConfig(
     fun isRingCloudNative(): Boolean {
         return brand == CameraBrand.RING_CLOUD &&
             deviceId.isNotBlank() &&
-            customStreamUrl.isBlank() &&
-            host.isBlank()
+            customStreamUrl.isBlank()
     }
 
     fun displayAddressLabel(): String {

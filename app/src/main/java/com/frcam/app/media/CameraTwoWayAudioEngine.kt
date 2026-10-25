@@ -12,6 +12,7 @@ import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
+import com.frcam.app.protocol.RingWebRtcController
 import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -218,6 +219,10 @@ class CameraIntercomBroadcaster(private val context: Context) {
             audioRecord?.startRecording()
             _isBroadcasting.value = true
 
+            if (camera.isRingCloudNative()) {
+                RingWebRtcController.setMicrophoneEnabled(camera.id, true)
+            }
+
             recordJob = scope.launch(Dispatchers.IO) {
                 val pcmBuffer = ShortArray(320) // 40ms of 8000Hz mono audio
                 var seq = 0
@@ -261,6 +266,7 @@ class CameraIntercomBroadcaster(private val context: Context) {
     fun stopBroadcasting() {
         _isBroadcasting.value = false
         _voiceAmplitude.value = 0f
+        RingWebRtcController.setMicrophoneEnabled(null, false)
         recordJob?.cancel()
         recordJob = null
         try {
