@@ -1,0 +1,584 @@
+package com.frcam.app.media
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
+import android.media.MediaMuxer
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.view.Surface
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import com.frcam.app.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.abs
+import kotlin.random.Random
+
+data class MotionEventRecord(
+    val id: String,
+    val cameraId: String,
+    val cameraName: String,
+    val timestampMs: Long,
+    val formattedTime: String,
+    val motionScorePercent: Float,
+    val snapshot: Bitmap,
+    val gifFile: File? = null,
+    val animationFrames: List<Bitmap> = emptyList()
+)
+
+object CameraMediaEngine {
+
+    private const val MOTION_CHANNEL_ID = "frcam_motion_alerts"
+    private val _motionEvents = MutableStateFlow<List<MotionEventRecord>>(emptyList())
+    val motionEvents: StateFlow<List<MotionEventRecord>> = _motionEvents.asStateFlow()
+
+    fun ensureNotificationChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                MOTION_CHANNEL_ID,
+                "Alertas de Movimiento (Estilo Ring)",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notificaciones instantáneas con clips animados de movimiento"
+                enableVibration(true)
+            }
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.createNotificationChannel(channel)
+        }
+    }
+
+    fun createMotionGif(context: Context, cameraId: String, frames: List<Bitmap>): File? {
+        if (frames.isEmpty()) return null
+        return try {
+            val cacheDir = File(context.cacheDir, "motion_gifs").apply { mkdirs() }
+            val gifFile = File(cacheDir, "motion_${cameraId}_${System.currentTimeMillis()}.gif")
+            val fos = java.io.FileOutputStream(gifFile)
+            val encoder = AnimatedGifEncoder()
+            encoder.start(fos)
+            encoder.setRepeat(0)
+            encoder.setDelay(280) // ~3.5 FPS animated preview
+            for (f in frames) {
+                val scaled = Bitmap.createScaledBitmap(f, 320, 180, true)
+                encoder.addFrame(scaled)
+                if (scaled !== f) scaled.recycle()
+            }
+            encoder.finish()
+            fos.close()
+            gifFile
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Dispatches a Ring-style rich push notification with an animated GIF movement preview
+     * and records the event in the in-app motion history.
+     */
+    fun notifyMotionDetected(
+        context: Context,
+        cameraId: String,
+        cameraName: String,
+        motionPercent: Float,
+        rawBitmap: Bitmap,
+        burstFrames: List<Bitmap> = emptyList()
+    ) {
+        ensureNotificationChannel(context)
+
+        val stampedBitmap = stampBitmapWithOverlay(rawBitmap, cameraName)
+        val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        val timeStr = sdf.format(Date())
+
+        val framesForGif = if (burstFrames.isNotEmpty()) {
+            burstFrames.map { stampBitmapWithOverlay(it, cameraName) }
+        } else {
+            listOf(stampedBitmap, stampedBitmap, stampedBitmap)
+        }
+
+        val gifFile = createMotionGif(context, cameraId, framesForGif)
+
+        val event = MotionEventRecord(
+            id = "${cameraId}_${System.currentTimeMillis()}",
+            cameraId = cameraId,
+            cameraName = cameraName,
+            timestampMs = System.currentTimeMillis(),
+            formattedTime = timeStr,
+            motionScorePercent = motionPercent,
+            snapshot = stampedBitmap,
+            gifFile = gifFile,
+            animationFrames = framesForGif
+        )
+        _motionEvents.value = (listOf(event) + _motionEvents.value).take(30)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+        }
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("open_camera_id", cameraId)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            cameraId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = NotificationCompat.Builder(context, MOTION_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setContentTitle("🚨 Movimiento detectado: $cameraName")
+            .setContentText("A las $timeStr (${"%.1f".format(motionPercent)}% actividad) • Clip animado disponible")
+            .setLargeIcon(stampedBitmap)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+
+        val bigPicStyle = NotificationCompat.BigPictureStyle()
+            .bigLargeIcon(null as Bitmap?)
+            .setSummaryText("$cameraName • $timeStr (Clip animado)")
+
+        if (gifFile != null && gifFile.exists()) {
+            try {
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    gifFile
+                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val icon = android.graphics.drawable.Icon.createWithContentUri(uri)
+                    bigPicStyle.bigPicture(icon)
+                } else {
+                    bigPicStyle.bigPicture(stampedBitmap)
+                }
+            } catch (_: Exception) {
+                bigPicStyle.bigPicture(stampedBitmap)
+            }
+        } else {
+            bigPicStyle.bigPicture(stampedBitmap)
+        }
+
+        builder.setStyle(bigPicStyle)
+
+        NotificationManagerCompat.from(context)
+            .notify(cameraId.hashCode() xor Random.Default.nextInt(1, 9999), builder.build())
+    }
+
+    private fun stampBitmapWithOverlay(source: Bitmap, cameraName: String): Bitmap {
+        return try {
+            val copy = source.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = Canvas(copy)
+            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            val label = "FrCam • $cameraName • ${sdf.format(Date())}"
+
+            val bgPaint = Paint().apply {
+                color = Color.argb(150, 0, 0, 0)
+                style = Paint.Style.FILL
+            }
+            val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = (copy.height * 0.036f).coerceIn(18f, 42f)
+                isFakeBoldText = true
+            }
+            val pad = 12f
+            val textWidth = textPaint.measureText(label)
+            val boxHeight = textPaint.textSize + pad * 2
+            canvas.drawRect(
+                0f,
+                copy.height - boxHeight,
+                textWidth + pad * 3,
+                copy.height.toFloat(),
+                bgPaint
+            )
+            canvas.drawText(label, pad, copy.height - pad * 1.2f, textPaint)
+            copy
+        } catch (_: Exception) {
+            source
+        }
+    }
+
+    /**
+     * Saves a single JPEG snapshot into Android Gallery (Pictures/FrCam).
+     */
+    suspend fun saveSnapshotToGallery(
+        context: Context,
+        cameraName: String,
+        bitmap: Bitmap
+    ): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val stamped = stampBitmapWithOverlay(bitmap, cameraName)
+            val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+            val safeName = cameraName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val fileName = "FrCam_${safeName}_${sdf.format(Date())}.jpg"
+
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/FrCam")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+            }
+
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: return@withContext Result.failure(Exception("No se pudo crear imagen en Galería"))
+
+            resolver.openOutputStream(uri)?.use { out ->
+                stamped.compress(Bitmap.CompressFormat.JPEG, 92, out)
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+
+            Result.success("Foto guardada en Galería (Pictures/FrCam/$fileName)")
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+}
+
+/**
+ * Per-camera real-time frame motion detector.
+ * Downscales frames to a 64x36 luminance grid and triggers Ring-style notifications on motion.
+ */
+class FrameMotionDetector(
+    private val gridW: Int = 64,
+    private val gridH: Int = 36,
+    private val pixelDeltaThreshold: Int = 24,
+    private val motionAreaThresholdPercent: Float = 4.5f,
+    private val cooldownMs: Long = 12_000L
+) {
+    private var previousLuma: IntArray? = null
+    private var warmupFramesRemaining = 3
+    private var lastTriggerTimeMs = 0L
+    private val rollingFrames = mutableListOf<Bitmap>()
+
+    fun inspectFrame(
+        context: Context,
+        cameraId: String,
+        cameraName: String,
+        frameBitmap: Bitmap
+    ): Float {
+        return try {
+            val copyForBuffer = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            rollingFrames.add(copyForBuffer)
+            if (rollingFrames.size > 5) {
+                val old = rollingFrames.removeAt(0)
+                if (!old.isRecycled) old.recycle()
+            }
+
+            val scaled = Bitmap.createScaledBitmap(frameBitmap, gridW, gridH, false)
+            val pixels = IntArray(gridW * gridH)
+            scaled.getPixels(pixels, 0, gridW, 0, 0, gridW, gridH)
+
+            val currentLuma = IntArray(gridW * gridH)
+            for (i in pixels.indices) {
+                val c = pixels[i]
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                currentLuma[i] = (r * 3 + g * 4 + b) shr 3
+            }
+
+            if (warmupFramesRemaining > 0) {
+                warmupFramesRemaining--
+                previousLuma = currentLuma
+                return 0f
+            }
+
+            val prev = previousLuma
+            previousLuma = currentLuma
+            if (prev == null) return 0f
+
+            var changedCells = 0
+            for (i in currentLuma.indices) {
+                if (abs(currentLuma[i] - prev[i]) >= pixelDeltaThreshold) {
+                    changedCells++
+                }
+            }
+
+            val percent = (changedCells * 100f) / (gridW * gridH).toFloat()
+            val now = System.currentTimeMillis()
+
+            if (percent >= motionAreaThresholdPercent && (now - lastTriggerTimeMs) >= cooldownMs) {
+                lastTriggerTimeMs = now
+                val copyForAlert = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                val burst = rollingFrames.map { it.copy(Bitmap.Config.ARGB_8888, false) }
+                CameraMediaEngine.notifyMotionDetected(
+                    context = context,
+                    cameraId = cameraId,
+                    cameraName = cameraName,
+                    motionPercent = percent,
+                    rawBitmap = copyForAlert,
+                    burstFrames = burst
+                )
+            }
+            percent
+        } catch (_: Exception) {
+            0f
+        }
+    }
+
+    fun reset() {
+        previousLuma = null
+        warmupFramesRemaining = 3
+        rollingFrames.forEach { if (!it.isRecycled) it.recycle() }
+        rollingFrames.clear()
+    }
+}
+
+/**
+ * Hardware-accelerated MP4 Video Recorder that captures live frames from any camera protocol
+ * (V380 Cloud/LAN, Eye4, V720, RTSP, MJPEG, Ring) and encodes a standard H.264 .mp4 file into
+ * Android's Gallery (Movies/FrCam).
+ */
+class LiveMp4VideoRecorder(
+    private val context: Context,
+    private val cameraName: String,
+    private val width: Int = 1280,
+    private val height: Int = 720,
+    private val fps: Int = 12
+) {
+    private var encoder: MediaCodec? = null
+    private var inputSurface: Surface? = null
+    private var muxer: MediaMuxer? = null
+    private var trackIndex = -1
+    private var muxerStarted = false
+    private var tempFile: File? = null
+    private var recordJob: Job? = null
+
+    @Volatile
+    var isRecording: Boolean = false
+        private set
+
+    fun startRecording(
+        scope: CoroutineScope,
+        frameProvider: () -> Bitmap?,
+        onElapsedSeconds: (Int) -> Unit
+    ): Boolean {
+        if (isRecording) return false
+        return try {
+            val safeName = cameraName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+            val file = File(context.cacheDir, "FrCam_${safeName}_${sdf.format(Date())}.mp4")
+            tempFile = file
+
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, 2_500_000)
+                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            }
+
+            val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val surface = codec.createInputSurface()
+            codec.start()
+
+            val mediaMuxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+            encoder = codec
+            inputSurface = surface
+            muxer = mediaMuxer
+            trackIndex = -1
+            muxerStarted = false
+            isRecording = true
+
+            recordJob = scope.launch(Dispatchers.Default) {
+                val destRect = Rect(0, 0, width, height)
+                val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+                val frameIntervalMs = 1000L / fps
+                val startMs = System.currentTimeMillis()
+                val bufferInfo = MediaCodec.BufferInfo()
+
+                while (isActive && isRecording) {
+                    val loopStart = System.currentTimeMillis()
+                    val bmp = withContext(Dispatchers.Main) {
+                        frameProvider()
+                    }
+                    if (bmp != null && !bmp.isRecycled) {
+                        try {
+                            val canvas = surface.lockHardwareCanvas()
+                            canvas.drawColor(Color.BLACK)
+                            canvas.drawBitmap(bmp, null, destRect, paint)
+                            surface.unlockCanvasAndPost(canvas)
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    drainEncoder(codec, mediaMuxer, bufferInfo, endOfStream = false)
+
+                    val elapsedSec = ((System.currentTimeMillis() - startMs) / 1000L).toInt()
+                    onElapsedSeconds(elapsedSec)
+
+                    val spent = System.currentTimeMillis() - loopStart
+                    val wait = (frameIntervalMs - spent).coerceAtLeast(10L)
+                    delay(wait)
+                }
+            }
+            true
+        } catch (_: Exception) {
+            isRecording = false
+            false
+        }
+    }
+
+    suspend fun stopAndSaveToGallery(): Result<String> = withContext(Dispatchers.IO) {
+        if (!isRecording) {
+            return@withContext Result.failure(Exception("No hay grabación activa"))
+        }
+        isRecording = false
+        try {
+            recordJob?.join()
+        } catch (_: Exception) {
+        }
+
+        val codec = encoder
+        val mediaMuxer = muxer
+        val file = tempFile
+
+        try {
+            if (codec != null && mediaMuxer != null) {
+                val bufferInfo = MediaCodec.BufferInfo()
+                drainEncoder(codec, mediaMuxer, bufferInfo, endOfStream = true)
+            }
+        } catch (_: Exception) {
+        }
+
+        try {
+            codec?.stop()
+            codec?.release()
+        } catch (_: Exception) {
+        }
+        try {
+            inputSurface?.release()
+        } catch (_: Exception) {
+        }
+        try {
+            if (muxerStarted) {
+                mediaMuxer?.stop()
+            }
+            mediaMuxer?.release()
+        } catch (_: Exception) {
+        }
+
+        encoder = null
+        inputSurface = null
+        muxer = null
+
+        if (file == null || !file.exists() || file.length() < 512L) {
+            return@withContext Result.failure(Exception("El video grabado es demasiado corto o no recibió fotogramas"))
+        }
+
+        return@withContext try {
+            val fileName = file.name
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/FrCam")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                ?: return@withContext Result.failure(Exception("No se pudo guardar el MP4 en Galería"))
+
+            resolver.openOutputStream(uri)?.use { out ->
+                file.inputStream().use { input ->
+                    input.copyTo(out)
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+            file.delete()
+
+            Result.success("Video guardado en Galería: Movies/FrCam/$fileName")
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun drainEncoder(
+        codec: MediaCodec,
+        mediaMuxer: MediaMuxer,
+        bufferInfo: MediaCodec.BufferInfo,
+        endOfStream: Boolean
+    ) {
+        if (endOfStream) {
+            try {
+                codec.signalEndOfInputStream()
+            } catch (_: Exception) {
+                return
+            }
+        }
+
+        while (true) {
+            val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
+            if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (!endOfStream) break
+            } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                if (!muxerStarted) {
+                    trackIndex = mediaMuxer.addTrack(codec.outputFormat)
+                    mediaMuxer.start()
+                    muxerStarted = true
+                }
+            } else if (outIndex >= 0) {
+                val encodedData = codec.getOutputBuffer(outIndex)
+                if (encodedData != null && bufferInfo.size > 0 && muxerStarted) {
+                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                        encodedData.position(bufferInfo.offset)
+                        encodedData.limit(bufferInfo.offset + bufferInfo.size)
+                        mediaMuxer.writeSampleData(trackIndex, encodedData, bufferInfo)
+                    }
+                }
+                codec.releaseOutputBuffer(outIndex, false)
+                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+    }
+}
