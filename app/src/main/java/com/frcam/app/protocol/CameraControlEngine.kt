@@ -104,7 +104,19 @@ object CameraControlEngine {
                     if (ok) Result.success("Comando CGI enviado")
                     else Result.failure(Exception("Error en CGI PTZ"))
                 }
-                PtzControlType.NONE -> Result.failure(Exception("PTZ deshabilitado en esta cámara"))
+                PtzControlType.NONE -> {
+                    if (camera.brand == CameraBrand.EYE4_VSTARCAM) {
+                        val cgiOk = sendEye4CgiPtz(camera, effectiveDir, stepDurationMs)
+                        if (cgiOk) Result.success("Comando PTZ Eye4 CGI enviado")
+                        else Result.failure(Exception("Error en CGI PTZ Eye4"))
+                    } else if (camera.host.isNotBlank()) {
+                        val onvifOk = sendOnvifPtzStep(camera, effectiveDir, stepDurationMs)
+                        if (onvifOk) Result.success("Comando PTZ ONVIF enviado")
+                        else Result.failure(Exception("Sin respuesta ONVIF PTZ en ${camera.host}:${camera.onvifPort}"))
+                    } else {
+                        Result.failure(Exception("PTZ no configurado en esta cámara"))
+                    }
+                }
             }
         } catch (e: Exception) {
             Result.failure(e)

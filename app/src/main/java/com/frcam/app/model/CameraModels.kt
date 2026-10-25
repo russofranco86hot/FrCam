@@ -323,6 +323,14 @@ data class CameraConfig(
         return false
     }
 
+    fun isPtzCapable(): Boolean {
+        if (ptzType != PtzControlType.NONE) return true
+        if (isV380NativeProtocol() || brand == CameraBrand.V380_PRO) return true
+        if (brand == CameraBrand.EYE4_VSTARCAM) return true
+        if (brand == CameraBrand.ONVIF_GENERIC || brand == CameraBrand.HIKVISION || brand == CameraBrand.DAHUA) return true
+        return false
+    }
+
     fun isRingCloudNative(): Boolean {
         return brand == CameraBrand.RING_CLOUD &&
             deviceId.isNotBlank() &&

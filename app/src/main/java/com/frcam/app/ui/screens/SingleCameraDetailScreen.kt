@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Sd
 import androidx.compose.material.icons.filled.Settings
@@ -188,219 +189,305 @@ fun SingleCameraDetailScreen(
         }
     }
 
-    if (isInPipMode) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-        ) {
-            UniversalCameraPlayer(
-                camera = camera,
-                useSubStream = useSubStream,
-                isMuted = isMuted,
-                enablePinchZoom = false,
-                frameCaptureHandle = frameCaptureHandle,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-        return
-    }
+    var showOnScreenCruceta by remember(camera.id) { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = camera.name,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "${camera.brand.displayName} • ${camera.displayAddressLabel()}",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onEnterPipMode) {
-                        Icon(
-                            imageVector = Icons.Default.PictureInPictureAlt,
-                            contentDescription = "Ventana flotante (PiP)",
-                            tint = Color(0xFF38BDF8)
-                        )
-                    }
-                    IconButton(
-                        onClick = {
-                            onOpenAdmin()
-                            showAdminSheet = true
+            if (!isInPipMode) {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(
+                                text = camera.name,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${camera.brand.displayName} • ${camera.displayAddressLabel()}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Administrar cámara (Wi-Fi, IP, Password, SD)",
-                            tint = Color(0xFF10B981)
-                        )
-                    }
-                    IconButton(onClick = { onEdit(camera) }) {
-                        Icon(Icons.Default.Edit, contentDescription = "Editar cámara")
-                    }
-                    IconButton(onClick = { onDelete(camera.id) }) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Eliminar cámara",
-                            tint = Color(0xFFF87171)
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = onEnterPipMode) {
+                            Icon(
+                                imageVector = Icons.Default.PictureInPictureAlt,
+                                contentDescription = "Ventana flotante (PiP)",
+                                tint = Color(0xFF38BDF8)
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                onOpenAdmin()
+                                showAdminSheet = true
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Tune,
+                                contentDescription = "Administrar cámara (Wi-Fi, IP, Password, SD)",
+                                tint = Color(0xFF10B981)
+                            )
+                        }
+                        IconButton(onClick = { onEdit(camera) }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Editar cámara")
+                        }
+                        IconButton(onClick = { onDelete(camera.id) }) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = "Eliminar cámara",
+                                tint = Color(0xFFF87171)
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
                 )
-            )
+            }
         }
     ) { paddingValues ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
+                .then(
+                    if (!isInPipMode) {
+                        Modifier
+                            .padding(paddingValues)
+                            .verticalScroll(rememberScrollState())
+                    } else {
+                        Modifier
+                    }
+                )
         ) {
-            // Live Video Player Surface (16:9 with Pinch-to-Zoom + Motion Detection)
+            // Live Video Player Surface (Full screen in PiP mode, 16:9 when regular)
             Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .background(Color.Black)
+                modifier = if (isInPipMode) {
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                } else {
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .background(Color.Black)
+                }
             ) {
                 UniversalCameraPlayer(
                     camera = camera,
                     useSubStream = useSubStream,
                     isMuted = isMuted,
-                    enablePinchZoom = true,
+                    enablePinchZoom = !isInPipMode,
                     frameCaptureHandle = frameCaptureHandle,
                     onResolutionChanged = { res -> detectedResolution = res },
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Recording Indicator Overlay
-                if (isRecordingVideo) {
-                    val mins = recordingSeconds / 60
-                    val secs = recordingSeconds % 60
+                if (!isInPipMode) {
+                    // Recording Indicator Overlay
+                    if (isRecordingVideo) {
+                        val mins = recordingSeconds / 60
+                        val secs = recordingSeconds % 60
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 8.dp)
+                                .background(Color(0xFFDC2626).copy(alpha = 0.90f), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FiberManualRecord,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "GRABANDO %02d:%02d".format(mins, secs),
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+
+                    // Floating On-Screen Controls: Escuchar, Silenciar, Micrófono y Cruceta sobre la cámara
                     Row(
                         modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 8.dp)
-                            .background(Color(0xFFDC2626).copy(alpha = 0.90f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                            .align(Alignment.BottomEnd)
+                            .padding(8.dp)
+                            .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(24.dp))
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.FiberManualRecord,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(12.dp)
-                        )
-                        Text(
-                            text = "GRABANDO %02d:%02d".format(mins, secs),
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                    }
-                }
+                        // Botón de audio (Parlante)
+                        FilledIconButton(
+                            onClick = { isMuted = !isMuted },
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = if (!isMuted) Color(0xFF059669) else Color(0xFF334155),
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = if (isMuted) "Activar Audio" else "Silenciar Audio",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
 
-                // Floating On-Screen Controls: Escuchar, Silenciar y Micrófono sobre la cámara
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(8.dp)
-                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(24.dp))
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // Botón de audio (Parlante)
-                    FilledIconButton(
-                        onClick = { isMuted = !isMuted },
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = if (!isMuted) Color(0xFF059669) else Color(0xFF334155),
-                            contentColor = Color.White
-                        ),
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                            contentDescription = if (isMuted) "Activar Audio" else "Silenciar Audio",
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Botón de micrófono (Hablar)
-                    FilledIconButton(
-                        onClick = {
-                            if (isBroadcastingVoice) {
-                                intercomBroadcaster.stopBroadcasting()
-                            } else {
-                                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                                    intercomBroadcaster.startBroadcasting(
-                                        camera = camera,
-                                        scope = coroutineScope,
-                                        onError = { err ->
-                                            mediaFeedback = err
-                                            Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                                        }
-                                    )
+                        // Botón de micrófono (Hablar)
+                        FilledIconButton(
+                            onClick = {
+                                if (isBroadcastingVoice) {
+                                    intercomBroadcaster.stopBroadcasting()
                                 } else {
-                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                        intercomBroadcaster.startBroadcasting(
+                                            camera = camera,
+                                            scope = coroutineScope,
+                                            onError = { err ->
+                                                mediaFeedback = err
+                                                Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                    } else {
+                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
                                 }
-                            }
-                        },
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = if (isBroadcastingVoice) Color(0xFFDC2626) else Color(0xFF0284C7),
-                            contentColor = Color.White
-                        ),
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isBroadcastingVoice) Icons.Default.MicOff else Icons.Default.Mic,
-                            contentDescription = if (isBroadcastingVoice) "Cortar Micrófono" else "Hablar por Cámara",
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
+                            },
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = if (isBroadcastingVoice) Color(0xFFDC2626) else Color(0xFF0284C7),
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isBroadcastingVoice) Icons.Default.MicOff else Icons.Default.Mic,
+                                contentDescription = if (isBroadcastingVoice) "Cortar Micrófono" else "Hablar por Cámara",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
 
-                // Banner de voz en curso sobre la cámara
-                if (isBroadcastingVoice) {
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 52.dp)
-                            .background(Color(0xD0DC2626), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Mic,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "HABLANDO AL PARLANTE...",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        // Botón de Cruceta flotante sobre video
+                        if (camera.isPtzCapable()) {
+                            FilledIconButton(
+                                onClick = { showOnScreenCruceta = !showOnScreenCruceta },
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = if (showOnScreenCruceta) Color(0xFF0284C7) else Color(0xFF334155),
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.OpenWith,
+                                    contentDescription = if (showOnScreenCruceta) "Ocultar Cruceta" else "Cruceta en Pantalla",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Floating On-Screen D-Pad (Cruceta interactiva sobre el video)
+                    if (showOnScreenCruceta && camera.isPtzCapable()) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .padding(start = 12.dp)
+                                .size(140.dp)
+                                .background(Color(0xA0000000), CircleShape)
+                                .border(1.5.dp, Color(0x9038BDF8), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            // Arriba
+                            FilledTonalIconButton(
+                                onClick = { onPtzCommand(PtzDirection.UP) },
+                                modifier = Modifier
+                                    .align(Alignment.TopCenter)
+                                    .padding(top = 4.dp)
+                                    .size(38.dp)
+                            ) {
+                                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Arriba", tint = Color.White)
+                            }
+                            // Abajo
+                            FilledTonalIconButton(
+                                onClick = { onPtzCommand(PtzDirection.DOWN) },
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 4.dp)
+                                    .size(38.dp)
+                            ) {
+                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Abajo", tint = Color.White)
+                            }
+                            // Izquierda
+                            FilledTonalIconButton(
+                                onClick = { onPtzCommand(PtzDirection.LEFT) },
+                                modifier = Modifier
+                                    .align(Alignment.CenterStart)
+                                    .padding(start = 4.dp)
+                                    .size(38.dp)
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Izquierda", tint = Color.White)
+                            }
+                            // Derecha
+                            FilledTonalIconButton(
+                                onClick = { onPtzCommand(PtzDirection.RIGHT) },
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .padding(end = 4.dp)
+                                    .size(38.dp)
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Derecha", tint = Color.White)
+                            }
+                            // Centro
+                            FilledIconButton(
+                                onClick = { onPtzCommand(PtzDirection.HOME) },
+                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFF0284C7)),
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CenterFocusStrong,
+                                    contentDescription = "Centrar",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Banner de voz en curso sobre la cámara
+                    if (isBroadcastingVoice) {
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 52.dp)
+                                .background(Color(0xD0DC2626), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "HABLANDO AL PARLANTE...",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -615,6 +702,218 @@ fun SingleCameraDetailScreen(
                 }
             }
 
+            // PTZ Control Console (Cruceta Motorizada Arriba / Abajo / Izquierda / Derecha)
+            if (camera.isPtzCapable()) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141D2F)),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    text = "Control Motorizado PTZ (Cruceta)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = camera.ptzType.label,
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                            if (!ptzFeedback.isNullOrBlank()) {
+                                Text(
+                                    text = ptzFeedback,
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF38BDF8),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // D-Pad Circular Console
+                            Box(
+                                modifier = Modifier
+                                    .size(176.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF0B111E))
+                                    .border(1.5.dp, Color(0xFF1E293B), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                FilledTonalIconButton(
+                                    onClick = { onPtzCommand(PtzDirection.UP) },
+                                    modifier = Modifier
+                                        .align(Alignment.TopCenter)
+                                        .padding(top = 8.dp)
+                                        .size(46.dp)
+                                ) {
+                                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Arriba")
+                                }
+
+                                FilledTonalIconButton(
+                                    onClick = { onPtzCommand(PtzDirection.DOWN) },
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(bottom = 8.dp)
+                                        .size(46.dp)
+                                ) {
+                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Abajo")
+                                }
+
+                                FilledTonalIconButton(
+                                    onClick = { onPtzCommand(PtzDirection.LEFT) },
+                                    modifier = Modifier
+                                        .align(Alignment.CenterStart)
+                                        .padding(start = 8.dp)
+                                        .size(46.dp)
+                                ) {
+                                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Izquierda")
+                                }
+
+                                FilledTonalIconButton(
+                                    onClick = { onPtzCommand(PtzDirection.RIGHT) },
+                                    modifier = Modifier
+                                        .align(Alignment.CenterEnd)
+                                        .padding(end = 8.dp)
+                                        .size(46.dp)
+                                ) {
+                                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Derecha")
+                                }
+
+                                FilledIconButton(
+                                    onClick = { onPtzCommand(PtzDirection.HOME) },
+                                    colors = IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = Color(0xFF0284C7)
+                                    ),
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CenterFocusStrong,
+                                        contentDescription = "Posición Central",
+                                        tint = Color.White
+                                    )
+                                }
+                            }
+
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                FilledTonalButton(
+                                    onClick = { onPtzCommand(PtzDirection.ZOOM_IN) },
+                                    modifier = Modifier.width(124.dp)
+                                ) {
+                                    Icon(Icons.Default.ZoomIn, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Zoom +", fontSize = 12.sp)
+                                }
+
+                                FilledTonalButton(
+                                    onClick = { onPtzCommand(PtzDirection.ZOOM_OUT) },
+                                    modifier = Modifier.width(124.dp)
+                                ) {
+                                    Icon(Icons.Default.ZoomOut, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Zoom -", fontSize = 12.sp)
+                                }
+
+                                OutlinedButton(
+                                    onClick = { onPtzCommand(PtzDirection.STOP) },
+                                    modifier = Modifier.width(124.dp)
+                                ) {
+                                    Icon(Icons.Default.StopCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Detener", fontSize = 12.sp)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        if (camera.brand == CameraBrand.V380_PRO || camera.isV380NativeProtocol()) {
+                            Text(
+                                text = "Controles Especiales V380 (Luz LED, Infrarrojo e Imagen):",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF7DD3FC),
+                                modifier = Modifier.align(Alignment.Start)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(
+                                    V380AuxCommand.LIGHT_ON,
+                                    V380AuxCommand.LIGHT_OFF,
+                                    V380AuxCommand.LIGHT_AUTO,
+                                    V380AuxCommand.IMAGE_COLOR,
+                                    V380AuxCommand.IMAGE_BW,
+                                    V380AuxCommand.IMAGE_FLIP
+                               ).forEach { aux ->
+                                    AssistChip(
+                                        onClick = { onV380AuxCommand(aux) },
+                                        label = { Text(aux.label, fontSize = 11.sp) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = if (aux == V380AuxCommand.IMAGE_FLIP)
+                                                    Icons.Default.FlipCameraAndroid
+                                                else Icons.Default.LightMode,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                (1..4).forEach { preset ->
+                                    OutlinedButton(
+                                        onClick = { onGotoPreset(preset) },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.BookmarkBorder,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("P$preset", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Two-Way Audio Console (Escuchar sonido ambiente y Hablar por la cámara)
             Card(
                 modifier = Modifier
@@ -771,216 +1070,7 @@ fun SingleCameraDetailScreen(
                 }
             }
 
-            // PTZ Control Console
-            if (camera.ptzType != PtzControlType.NONE) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141D2F)),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text(
-                                    text = "Control Motorizado PTZ",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = camera.ptzType.label,
-                                    fontSize = 11.sp,
-                                    color = Color(0xFF94A3B8)
-                                )
-                            }
-                            if (!ptzFeedback.isNullOrBlank()) {
-                                Text(
-                                    text = ptzFeedback,
-                                    fontSize = 11.sp,
-                                    color = Color(0xFF38BDF8),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
 
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(176.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF0B111E))
-                                    .border(1.5.dp, Color(0xFF1E293B), CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                FilledTonalIconButton(
-                                    onClick = { onPtzCommand(PtzDirection.UP) },
-                                    modifier = Modifier
-                                        .align(Alignment.TopCenter)
-                                        .padding(top = 8.dp)
-                                        .size(46.dp)
-                                ) {
-                                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Arriba")
-                                }
-
-                                FilledTonalIconButton(
-                                    onClick = { onPtzCommand(PtzDirection.DOWN) },
-                                    modifier = Modifier
-                                        .align(Alignment.BottomCenter)
-                                        .padding(bottom = 8.dp)
-                                        .size(46.dp)
-                                ) {
-                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Abajo")
-                                }
-
-                                FilledTonalIconButton(
-                                    onClick = { onPtzCommand(PtzDirection.LEFT) },
-                                    modifier = Modifier
-                                        .align(Alignment.CenterStart)
-                                        .padding(start = 8.dp)
-                                        .size(46.dp)
-                                ) {
-                                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Izquierda")
-                                }
-
-                                FilledTonalIconButton(
-                                    onClick = { onPtzCommand(PtzDirection.RIGHT) },
-                                    modifier = Modifier
-                                        .align(Alignment.CenterEnd)
-                                        .padding(end = 8.dp)
-                                        .size(46.dp)
-                                ) {
-                                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Derecha")
-                                }
-
-                                FilledIconButton(
-                                    onClick = { onPtzCommand(PtzDirection.HOME) },
-                                    colors = IconButtonDefaults.filledIconButtonColors(
-                                        containerColor = Color(0xFF0284C7)
-                                    ),
-                                    modifier = Modifier.size(48.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.CenterFocusStrong,
-                                        contentDescription = "Posición Central",
-                                        tint = Color.White
-                                    )
-                                }
-                            }
-
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                FilledTonalButton(
-                                    onClick = { onPtzCommand(PtzDirection.ZOOM_IN) },
-                                    modifier = Modifier.width(124.dp)
-                                ) {
-                                    Icon(Icons.Default.ZoomIn, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Zoom +", fontSize = 12.sp)
-                                }
-
-                                FilledTonalButton(
-                                    onClick = { onPtzCommand(PtzDirection.ZOOM_OUT) },
-                                    modifier = Modifier.width(124.dp)
-                                ) {
-                                    Icon(Icons.Default.ZoomOut, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Zoom -", fontSize = 12.sp)
-                                }
-
-                                OutlinedButton(
-                                    onClick = { onPtzCommand(PtzDirection.STOP) },
-                                    modifier = Modifier.width(124.dp)
-                                ) {
-                                    Icon(Icons.Default.StopCircle, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Detener", fontSize = 12.sp)
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        if (camera.brand == CameraBrand.V380_PRO || camera.isV380NativeProtocol()) {
-                            Text(
-                                text = "Controles Especiales V380 (Luz LED, Infrarrojo e Imagen):",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF7DD3FC),
-                                modifier = Modifier.align(Alignment.Start)
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            FlowRow(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                listOf(
-                                    V380AuxCommand.LIGHT_ON,
-                                    V380AuxCommand.LIGHT_OFF,
-                                    V380AuxCommand.LIGHT_AUTO,
-                                    V380AuxCommand.IMAGE_COLOR,
-                                    V380AuxCommand.IMAGE_BW,
-                                    V380AuxCommand.IMAGE_FLIP
-                                ).forEach { aux ->
-                                    AssistChip(
-                                        onClick = { onV380AuxCommand(aux) },
-                                        label = { Text(aux.label, fontSize = 11.sp) },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = if (aux == V380AuxCommand.IMAGE_FLIP)
-                                                    Icons.Default.FlipCameraAndroid
-                                                else Icons.Default.LightMode,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
-                                    )
-                                }
-                            }
-                        } else {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                (1..4).forEach { preset ->
-                                    OutlinedButton(
-                                        onClick = { onGotoPreset(preset) },
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.BookmarkBorder,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("P$preset", fontSize = 12.sp)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
             // Technical Connection Details Card
             Card(

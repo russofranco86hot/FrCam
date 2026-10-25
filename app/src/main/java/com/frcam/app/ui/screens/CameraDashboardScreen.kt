@@ -382,7 +382,7 @@ private fun CameraGridTile(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    if (camera.ptzType != PtzControlType.NONE) {
+                    if (camera.isPtzCapable()) {
                         Icon(
                             imageVector = Icons.Default.OpenWith,
                             contentDescription = "PTZ",

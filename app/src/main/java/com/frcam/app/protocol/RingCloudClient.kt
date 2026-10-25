@@ -207,6 +207,8 @@ object RingCloudClient {
         return list
     }
 
+    private val activeLiveDings = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
     suspend fun wakeLiveStream(doorbotId: Long): Boolean = withContext(Dispatchers.IO) {
         val accessToken = ensureValidAccessToken() ?: return@withContext false
         try {
@@ -223,6 +225,20 @@ object RingCloudClient {
                 outputStream.use { it.write(body.toByteArray()) }
             }
             val ok = conn.responseCode in 200..299
+            if (ok) {
+                try {
+                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                    if (resp.isNotBlank()) {
+                        val json = JSONObject(resp)
+                        val vodDingId = json.optLong("id", 0L).takeIf { it > 0 } 
+                            ?: json.optString("id_str").toLongOrNull() ?: 0L
+                        if (vodDingId > 0) {
+                            activeLiveDings[doorbotId] = vodDingId
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
             conn.disconnect()
 
             // Trigger fresh snapshot capture from Ring Cloud
@@ -243,9 +259,10 @@ object RingCloudClient {
                 readTimeout = 3000
                 requestMethod = "PUT"
                 doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("Authorization", "Bearer $accessToken")
                 setRequestProperty("User-Agent", "android:com.ringapp")
-                val body = """{"doorbot_ids":[$doorbotId]}"""
+                val body = """{"doorbot_ids":[$doorbotId],"update_all":true}"""
                 outputStream.use { it.write(body.toByteArray()) }
             }
             val ok = conn.responseCode in 200..299
@@ -289,9 +306,9 @@ object RingCloudClient {
         val now = System.currentTimeMillis()
         var bmp: Bitmap? = null
 
-        // 2. Try app-snaps endpoint (Ring Next-Gen low-latency snapshot)
+        // 2. Try app-snaps endpoint: https://app-snaps.ring.com/next/{device_id} (Official Next-Gen snapshot)
         try {
-            val appSnapsUrl = "https://app-snaps.ring.com/snapshots/next/$doorbotId?_t=$now"
+            val appSnapsUrl = "https://app-snaps.ring.com/next/$doorbotId?_t=$now"
             val snapConn = (URL(appSnapsUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 3500
                 readTimeout = 3500
@@ -312,7 +329,32 @@ object RingCloudClient {
         } catch (_: Exception) {
         }
 
-        // 3. Fallback to clients_api with timestamp cache-buster
+        // 3. Try official /v1/devices/{device_id}/media/image/download (Ring Media Service endpoint)
+        if (bmp == null) {
+            try {
+                val mediaUrl = "https://api.ring.com/v1/devices/$doorbotId/media/image/download?_t=$now"
+                val mediaConn = (URL(mediaUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    requestMethod = "GET"
+                    useCaches = false
+                    setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
+                    setRequestProperty("Pragma", "no-cache")
+                    setRequestProperty("Authorization", "Bearer $accessToken")
+                    setRequestProperty("User-Agent", "android:com.ringapp")
+                }
+                if (mediaConn.responseCode in 200..299) {
+                    val bytes = mediaConn.inputStream.readBytes()
+                    if (bytes.isNotEmpty()) {
+                        bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    }
+                }
+                mediaConn.disconnect()
+            } catch (_: Exception) {
+            }
+        }
+
+        // 4. Fallback to clients_api snapshots with timestamp cache-buster
         if (bmp == null) {
             try {
                 val imageUrl = "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now"
@@ -351,37 +393,40 @@ object RingCloudClient {
     suspend fun fetchLatestRecordingUrl(doorbotId: Long): String? = withContext(Dispatchers.IO) {
         val accessToken = ensureValidAccessToken() ?: return@withContext null
         try {
-            // 1. Check for active ding / live recording
-            var dingId: Long? = null
-            try {
-                val dingsUrl = "https://api.ring.com/clients_api/dings/active"
-                val conn = (URL(dingsUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 3000
-                    readTimeout = 3000
-                    requestMethod = "GET"
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                    setRequestProperty("User-Agent", "android:com.ringapp")
-                }
-                if (conn.responseCode in 200..299) {
-                    val body = conn.inputStream.bufferedReader().use { it.readText() }
-                    val array = org.json.JSONArray(body)
-                    for (i in 0 until array.length()) {
-                        val item = array.getJSONObject(i)
-                        val dbId = item.optLong("doorbot_id", 0L)
-                        if (dbId == doorbotId || doorbotId == 0L) {
-                            dingId = item.optLong("id", 0L).takeIf { it > 0 }
-                            if (dingId != null) break
-                        }
-                    }
-                }
-                conn.disconnect()
-            } catch (_: Exception) {
-            }
+            var dingId: Long? = activeLiveDings[doorbotId]
 
-            // 2. Fallback to latest event from history
+            // 1. Check for active ding / live recording if not cached
             if (dingId == null || dingId <= 0L) {
                 try {
-                    val historyUrl = "https://api.ring.com/clients_api/doorbots/$doorbotId/history?limit=3"
+                    val dingsUrl = "https://api.ring.com/clients_api/dings/active"
+                    val conn = (URL(dingsUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 3000
+                        readTimeout = 3000
+                        requestMethod = "GET"
+                        setRequestProperty("Authorization", "Bearer $accessToken")
+                        setRequestProperty("User-Agent", "android:com.ringapp")
+                    }
+                    if (conn.responseCode in 200..299) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val array = org.json.JSONArray(body)
+                        for (i in 0 until array.length()) {
+                            val item = array.getJSONObject(i)
+                            val dbId = item.optLong("doorbot_id", 0L)
+                            if (dbId == doorbotId || doorbotId == 0L) {
+                                dingId = item.optLong("id", 0L).takeIf { it > 0 }
+                                if (dingId != null) break
+                            }
+                        }
+                    }
+                    conn.disconnect()
+                } catch (_: Exception) {
+                }
+            }
+
+            // 2. Query doorbots history - using official Ring endpoint /clients_api/doorbots/history
+            if (dingId == null || dingId <= 0L) {
+                try {
+                    val historyUrl = "https://api.ring.com/clients_api/doorbots/history?limit=15"
                     val hConn = (URL(historyUrl).openConnection() as HttpURLConnection).apply {
                         connectTimeout = 3500
                         readTimeout = 3500
@@ -392,9 +437,17 @@ object RingCloudClient {
                     if (hConn.responseCode in 200..299) {
                         val hBody = hConn.inputStream.bufferedReader().use { it.readText() }
                         val hArray = org.json.JSONArray(hBody)
-                        if (hArray.length() > 0) {
-                            val first = hArray.getJSONObject(0)
-                            dingId = first.optLong("id", 0L).takeIf { it > 0 }
+                        for (i in 0 until hArray.length()) {
+                            val item = hArray.getJSONObject(i)
+                            val dbObj = item.optJSONObject("doorbot")
+                            val itemDoorbotId = dbObj?.optLong("id") ?: item.optLong("doorbot_id", 0L)
+                            if (doorbotId == 0L || itemDoorbotId == doorbotId) {
+                                dingId = item.optLong("id", 0L).takeIf { it > 0 }
+                                if (dingId != null) break
+                            }
+                        }
+                        if (dingId == null && hArray.length() > 0) {
+                            dingId = hArray.getJSONObject(0).optLong("id", 0L).takeIf { it > 0 }
                         }
                     }
                     hConn.disconnect()
@@ -405,7 +458,7 @@ object RingCloudClient {
             val targetDingId = dingId ?: return@withContext null
             if (targetDingId <= 0L) return@withContext null
 
-            // 3. Request recording URL (handles 302 redirect to pre-signed S3 .mp4)
+            // 3. Request recording URL (handles 302 redirect or JSON response to pre-signed S3 .mp4)
             val recUrl = "https://api.ring.com/clients_api/dings/$targetDingId/recording?api_version=9"
             val rConn = (URL(recUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 4000
@@ -415,7 +468,15 @@ object RingCloudClient {
                 setRequestProperty("Authorization", "Bearer $accessToken")
                 setRequestProperty("User-Agent", "android:com.ringapp")
             }
-            val redirectLoc = rConn.getHeaderField("Location")
+            var redirectLoc = rConn.getHeaderField("Location")
+            if (redirectLoc.isNullOrBlank() && rConn.responseCode in 200..299) {
+                val body = rConn.inputStream.bufferedReader().use { it.readText() }
+                try {
+                    val j = JSONObject(body)
+                    redirectLoc = j.optString("url").ifBlank { null }
+                } catch (_: Exception) {
+                }
+            }
             rConn.disconnect()
 
             if (!redirectLoc.isNullOrBlank()) {

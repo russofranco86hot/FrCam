@@ -453,25 +453,36 @@ private fun RingCloudStreamSurface(
             streamState = StreamState.LIVE
         }
 
-        // 3. Fallback snapshot loop with periodic refresh requests
+        // 3. Live motion streaming & snapshot loop
         var fetchCount = 0
         while (isActive) {
-            val ringFrame = RingCloudClient.fetchDeviceSnapshotWithMeta(doorbotId)
-            if (ringFrame != null) {
-                val bmp = ringFrame.bitmap
-                if (rawFrame == null) {
-                    onResolution("${bmp.width}x${bmp.height} (Ring Live)")
-                }
-                rawFrame = bmp
-                lastRingTimestampMs = ringFrame.ringTimestampMs
-                frameSequence++
-                if (activeRecordingUrl == null) {
+            // Check for live video clip from Ring VOD/Cloud if not yet active
+            if (activeRecordingUrl.isNullOrBlank()) {
+                val rec = RingCloudClient.fetchLatestRecordingUrl(doorbotId)
+                if (!rec.isNullOrBlank()) {
+                    activeRecordingUrl = rec
+                    onResolution("1080p (Ring Motion HD)")
                     streamState = StreamState.LIVE
                 }
-            } else if (rawFrame == null && activeRecordingUrl == null) {
-                streamState = StreamState.ERROR
-                statusText = "Inicia sesión en el ícono de Ring Cloud (arriba a la derecha)"
-                break
+            }
+
+            // If video clip is not yet ready, fetch fresh live snapshot frame
+            if (activeRecordingUrl.isNullOrBlank()) {
+                val ringFrame = RingCloudClient.fetchDeviceSnapshotWithMeta(doorbotId)
+                if (ringFrame != null) {
+                    val bmp = ringFrame.bitmap
+                    if (rawFrame == null) {
+                        onResolution("${bmp.width}x${bmp.height} (Ring Live)")
+                    }
+                    rawFrame = bmp
+                    lastRingTimestampMs = ringFrame.ringTimestampMs
+                    frameSequence++
+                    streamState = StreamState.LIVE
+                } else if (rawFrame == null) {
+                    streamState = StreamState.ERROR
+                    statusText = "Inicia sesión en el ícono de Ring Cloud (arriba a la derecha)"
+                    break
+                }
             }
 
             fetchCount++
