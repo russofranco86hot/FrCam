@@ -523,12 +523,21 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         username: String = device.detectedBrand.defaultUsername,
         password: String = ""
     ): CameraConfig {
+        val mode = if (device.deviceId.isNotBlank() || device.remoteHost.isNotBlank()) {
+            ConnectionMode.HYBRID_AUTO
+        } else {
+            ConnectionMode.LAN_IP
+        }
         return CameraConfig(
             name = device.deviceName,
             brand = device.detectedBrand,
-            connectionMode = if (device.deviceId.isNotBlank()) ConnectionMode.CLOUD_DEVICE_ID else ConnectionMode.LAN_IP,
+            connectionMode = mode,
             deviceId = device.deviceId,
             host = device.ipAddress,
+            remoteHost = device.remoteHost,
+            remoteRtspPort = device.remoteRtspPort,
+            remoteHttpPort = device.remoteHttpPort,
+            upnpMapped = device.upnpMapped,
             rtspPort = device.rtspPort,
             httpPort = device.httpPort,
             onvifPort = device.onvifPort,

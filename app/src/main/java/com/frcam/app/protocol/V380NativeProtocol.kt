@@ -485,6 +485,72 @@ object V380NativeProtocol {
     }
 
     /**
+     * Sends a direct unicast UDP query to a specific IP on port 10008.
+     * Unlike broadcast, unicast UDP works through router AP isolation and cross-band Wi-Fi.
+     */
+    fun queryV380DeviceIdUnicast(targetIp: String): V380LanDeviceInfo? {
+        try {
+            DatagramSocket().use { socket ->
+                socket.soTimeout = 400
+                val cmd = "NVDEVSEARCH^100".toByteArray(Charsets.US_ASCII)
+                val targetAddr = InetAddress.getByName(targetIp)
+                val sendPacket = DatagramPacket(cmd, cmd.size, targetAddr, 10008)
+                socket.send(sendPacket)
+
+                val buf = ByteArray(2048)
+                val recv = DatagramPacket(buf, buf.size)
+                socket.receive(recv)
+                val str = String(recv.data, 0, recv.length, Charsets.US_ASCII)
+                val parts = str.split("^")
+                if (parts.size >= 13 && parts[0] == "NVDEVRESULT") {
+                    val mac = parts[2]
+                    val ip = parts[3].ifBlank { targetIp }
+                    val devId = parts[12].trim()
+                    if (devId.isNotBlank()) {
+                        return V380LanDeviceInfo(mac = mac, ip = ip, deviceId = devId)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /**
+     * Connects to V380 TCP port 8800 and sends handshake probe to extract the 8-digit device ID
+     * directly from the camera hardware when UDP is completely blocked.
+     */
+    fun queryV380DeviceIdOverTcp(targetIp: String, port: Int = 8800): String {
+        try {
+            Socket().use { socket ->
+                socket.soTimeout = 1200
+                socket.connect(InetSocketAddress(targetIp, port), 800)
+                val out = socket.getOutputStream()
+                val input = socket.getInputStream()
+
+                val cmd1167 = ByteArray(520)
+                writeUInt32LE(cmd1167, 0, 1167L)
+                writeUInt32LE(cmd1167, 4, 120L)
+                cmd1167[8] = 31
+                writeUInt32LE(cmd1167, 9, 1L)
+                writeUInt32LE(cmd1167, 13, 0L) // Query device's own ID
+                out.write(cmd1167)
+                out.flush()
+
+                val resp = receiveAtLeast(input, 256, 20)
+                if (resp != null && readUInt32LE(resp, 0) == 1168L) {
+                    val parsedId = readUInt32LE(resp, 13)
+                    if (parsedId > 100000L) {
+                        return parsedId.toString()
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return ""
+    }
+
+    /**
      * Tests authentication (cmd 1167 -> 1168) against either V380 Cloud Relay or Local IP on port 8800.
      */
     suspend fun verifyV380Credentials(

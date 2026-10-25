@@ -106,6 +106,7 @@ import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.CameraDeviceInfo
 import com.frcam.app.model.PtzControlType
 import com.frcam.app.model.WifiNetworkScanResult
+import com.frcam.app.protocol.NetworkCameraScanner
 import com.frcam.app.protocol.PtzDirection
 import com.frcam.app.protocol.V380AuxCommand
 import com.frcam.app.ui.player.CameraFrameCaptureHandle
@@ -543,12 +544,55 @@ fun SingleCameraDetailScreen(
                         )
                     }
 
-                    Text(
-                        text = detectedResolution,
-                        fontSize = 11.sp,
-                        color = Color(0xFF38BDF8),
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val isLocal = NetworkCameraScanner.isSameLocalSubnet(camera.host)
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    if (isLocal) Color(0xFF065F46) else Color(0xFF0369A1),
+                                    RoundedCornerShape(6.dp)
+                                )
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = if (isLocal) "LAN CASA" else "NUBE REMOTA",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                        Text(
+                            text = detectedResolution,
+                            fontSize = 11.sp,
+                            color = Color(0xFF38BDF8),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                if (!NetworkCameraScanner.isSameLocalSubnet(camera.host) && camera.isV380NativeProtocol() && camera.password.isEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF7F1D1D).copy(alpha = 0.85f)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Tune, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                            Text(
+                                text = "Estás fuera de casa: Para ver tu V380 vía Nube sin tocar el router, ingresa la contraseña de la cámara en 'Administrar' o 'Editar'.",
+                                color = Color.White,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))

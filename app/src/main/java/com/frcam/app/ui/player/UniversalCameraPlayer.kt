@@ -79,6 +79,7 @@ import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.ConnectionMode
 import com.frcam.app.model.StreamProtocol
 import com.frcam.app.model.TransportMode
+import com.frcam.app.protocol.NetworkCameraScanner
 import com.frcam.app.protocol.RingCloudClient
 import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.Dispatchers
@@ -143,8 +144,19 @@ fun UniversalCameraPlayer(
 
     val isV380Native = remember(camera) { camera.isV380NativeProtocol() }
     val isRingNative = remember(camera) { camera.isRingCloudNative() }
-    val candidateUrls = remember(camera, useSubStream) {
-        camera.buildCandidateUrls(useSubStream)
+    val isOutsideHome = remember(camera.host) {
+        !NetworkCameraScanner.isSameLocalSubnet(camera.host)
+    }
+    val candidateUrls = remember(camera, useSubStream, isOutsideHome) {
+        val list = camera.buildCandidateUrls(useSubStream).toMutableList()
+        if (isOutsideHome && camera.remoteHost.isNotBlank()) {
+            val remoteCandidate = list.firstOrNull { it.contains(camera.remoteHost) }
+            if (remoteCandidate != null) {
+                list.remove(remoteCandidate)
+                list.add(0, remoteCandidate)
+            }
+        }
+        list
     }
     var candidateIndex by remember(camera.id, useSubStream) { mutableIntStateOf(0) }
     var retryCounter by remember { mutableIntStateOf(0) }
@@ -636,6 +648,10 @@ private fun V380HardwareStreamSurface(
         }
 
         try {
+            val isOutsideHome = !NetworkCameraScanner.isSameLocalSubnet(camera.host)
+            val preferCloudRelay = camera.connectionMode == ConnectionMode.CLOUD_DEVICE_ID ||
+                (camera.connectionMode == ConnectionMode.HYBRID_AUTO && isOutsideHome)
+
             V380NativeProtocol.runLiveStreamSession(
                 cameraId = camera.id,
                 deviceIdStr = camera.deviceId,
@@ -643,7 +659,7 @@ private fun V380HardwareStreamSurface(
                 port = camera.rtspPort,
                 username = camera.username,
                 password = camera.password,
-                preferCloud = camera.connectionMode == ConnectionMode.CLOUD_DEVICE_ID,
+                preferCloud = preferCloudRelay,
                 hdQuality = !useSubStream,
                 scope = this,
                 onStatus = { msg ->

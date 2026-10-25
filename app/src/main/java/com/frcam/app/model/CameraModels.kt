@@ -6,6 +6,7 @@ import java.util.UUID
 
 @Serializable
 enum class ConnectionMode(val label: String) {
+    HYBRID_AUTO("Automático (Local en Casa / Nube Fuera de Casa)"),
     CLOUD_DEVICE_ID("Remoto por ID / Nube (Sin tocar router)"),
     LAN_IP("Red Local (IP Wi-Fi / DDNS)")
 }
@@ -278,10 +279,14 @@ data class CameraConfig(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
     val brand: CameraBrand = CameraBrand.V380_PRO,
-    val connectionMode: ConnectionMode = brand.defaultConnectionMode,
+    val connectionMode: ConnectionMode = ConnectionMode.HYBRID_AUTO,
     val deviceId: String = "",
     val modelCode: String = "",
     val host: String = "",
+    val remoteHost: String = "",
+    val remoteRtspPort: Int = 0,
+    val remoteHttpPort: Int = 0,
+    val upnpMapped: Boolean = false,
     val rtspPort: Int = brand.defaultRtspPort,
     val httpPort: Int = brand.defaultHttpPort,
     val onvifPort: Int = brand.defaultOnvifPort,
@@ -313,7 +318,9 @@ data class CameraConfig(
     fun isV380NativeProtocol(): Boolean {
         if (protocol == StreamProtocol.V380_NATIVE) return true
         if (brand == CameraBrand.V380_PRO &&
-            (connectionMode == ConnectionMode.CLOUD_DEVICE_ID || rtspPort == 8800 || deviceId.isNotBlank())
+            (connectionMode == ConnectionMode.CLOUD_DEVICE_ID ||
+             connectionMode == ConnectionMode.HYBRID_AUTO ||
+             rtspPort == 8800 || deviceId.isNotBlank())
         ) {
             if (connectionMode == ConnectionMode.LAN_IP && rtspPort == 554 && protocol == StreamProtocol.RTSP) {
                 return false
@@ -341,6 +348,11 @@ data class CameraConfig(
     fun displayAddressLabel(): String {
         return if (isRingCloudNative()) {
             "Ring Cloud ID: $deviceId"
+        } else if (connectionMode == ConnectionMode.HYBRID_AUTO) {
+            if (deviceId.isNotBlank()) "Auto (ID: $deviceId • ${host.ifBlank { "Nube" }})"
+            else if (remoteHost.isNotBlank()) "Auto (LAN: $host • WAN: $remoteHost)"
+            else if (host.isNotBlank()) "Auto ($host:$rtspPort)"
+            else "Auto"
         } else if (connectionMode == ConnectionMode.CLOUD_DEVICE_ID && deviceId.isNotBlank()) {
             "Cloud ID: $deviceId"
         } else if (host.isNotBlank()) {
@@ -435,6 +447,15 @@ data class CameraConfig(
             if (password.isNotEmpty()) "${username.trim()}:$password@" else "${username.trim()}@"
         } else ""
 
+        if (remoteHost.isNotBlank() && remoteRtspPort > 0) {
+            val remoteUrl = if (protocol == StreamProtocol.HTTP_MJPEG) {
+                "http://$creds$remoteHost:$remoteHttpPort${if (mainStreamPath.startsWith("/")) mainStreamPath else "/$mainStreamPath"}"
+            } else {
+                "rtsp://$creds$remoteHost:$remoteRtspPort${if (mainStreamPath.startsWith("/")) mainStreamPath else "/$mainStreamPath"}"
+            }
+            if (remoteUrl !in candidates) candidates.add(remoteUrl)
+        }
+
         when (brand) {
             CameraBrand.EYE4_VSTARCAM -> {
                 val ports = listOf(rtspPort, 10554, 554).distinct()
@@ -504,7 +525,11 @@ data class DiscoveredCameraDevice(
     val onvifServiceUrl: String? = null,
     val suggestedMainPath: String = detectedBrand.defaultMainPath,
     val suggestedSubPath: String = detectedBrand.defaultSubPath,
-    val macOrHardwareInfo: String = ""
+    val macOrHardwareInfo: String = "",
+    val remoteHost: String = "",
+    val remoteRtspPort: Int = 0,
+    val remoteHttpPort: Int = 0,
+    val upnpMapped: Boolean = false
 )
 
 @Serializable

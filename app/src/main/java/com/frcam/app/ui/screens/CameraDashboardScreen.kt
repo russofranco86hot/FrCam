@@ -78,6 +78,7 @@ import androidx.compose.ui.unit.sp
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.GridLayoutMode
+import com.frcam.app.protocol.NetworkCameraScanner
 import com.frcam.app.model.PtzControlType
 import com.frcam.app.ui.player.UniversalCameraPlayer
 import java.text.SimpleDateFormat
@@ -372,16 +373,32 @@ private fun CameraGridTile(
                     }
                 }
 
-                // Brand & PTZ Badge Top-Right
+                // Brand, Location & PTZ Badge Top-Right
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(6.dp)
-                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    val isLocal = NetworkCameraScanner.isSameLocalSubnet(camera.host)
+                    Box(
+                        modifier = Modifier
+                            .background(
+                                if (isLocal) Color(0xFF059669) else Color(0xFF0284C7),
+                                RoundedCornerShape(4.dp)
+                            )
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            text = if (isLocal) "LAN" else "NUBE",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
                     if (camera.isPtzCapable()) {
                         Icon(
                             imageVector = Icons.Default.OpenWith,

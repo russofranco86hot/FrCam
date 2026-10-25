@@ -42,6 +42,24 @@ object NetworkCameraScanner {
     }
 
     /**
+     * Checks if a target host/IP is on the same local IPv4 subnet as this Android device.
+     * When false, the app automatically switches to Cloud Relay / UPnP WAN IP without requiring router setup.
+     */
+    fun isSameLocalSubnet(targetHostOrIp: String): Boolean {
+        if (targetHostOrIp.isBlank()) return false
+        val cleanHost = targetHostOrIp.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .removePrefix("rtsp://")
+            .substringBefore("/")
+            .substringBefore(":")
+        val localIp = getLocalIpv4Address() ?: return false
+        val localPrefix = localIp.substringBeforeLast(".")
+        val targetPrefix = cleanHost.substringBeforeLast(".")
+        return localPrefix == targetPrefix
+    }
+
+    /**
      * Runs:
      * 1. V380 Native UDP Broadcast ("NVDEVSEARCH^100" on port 10008 -> extracts IP, MAC, and 8-digit V380 Device ID)
      * 2. ONVIF WS-Discovery UDP Multicast (239.255.255.250:3702)
@@ -56,7 +74,15 @@ object NetworkCameraScanner {
 
         val discovered = ConcurrentHashMap<String, DiscoveredCameraDevice>()
 
-        onProgress(0.05f, "Buscando cámaras V380 por broadcast UDP (puerto 10008)...")
+        onProgress(0.04f, "Detectando router y gateway UPnP para acceso fuera de casa...")
+        val gateway = try {
+            UpnpIgdManager.discoverGateway()
+        } catch (_: Exception) {
+            null
+        }
+        val gatewayWanIp = gateway?.externalWanIp
+
+        onProgress(0.08f, "Buscando cámaras V380 por broadcast UDP (puerto 10008)...")
         val v380BroadcastDevices = V380NativeProtocol.discoverLanV380Devices()
         for (v380 in v380BroadcastDevices) {
             val dev = DiscoveredCameraDevice(
@@ -70,19 +96,20 @@ object NetworkCameraScanner {
                 deviceId = v380.deviceId,
                 suggestedMainPath = "/live/ch00_1",
                 suggestedSubPath = "/live/ch00_0",
-                macOrHardwareInfo = "ID V380: ${v380.deviceId} • MAC: ${v380.mac}"
+                macOrHardwareInfo = "ID V380: ${v380.deviceId} • MAC: ${v380.mac}",
+                remoteHost = gatewayWanIp.orEmpty()
             )
             discovered[v380.ip] = dev
             onDeviceFound(dev)
         }
 
-        onProgress(0.14f, "Enviando sonda UDP ONVIF WS-Discovery en $subnetPrefix.0/24...")
+        onProgress(0.15f, "Enviando sonda UDP ONVIF WS-Discovery en $subnetPrefix.0/24...")
         val onvifMap = discoverOnvifViaUdpMulticast()
 
         for ((ip, serviceUrl) in onvifMap) {
             if (ip == localIp || discovered.containsKey(ip)) continue
             val openPorts = probeCameraPorts(ip, timeoutMs = 260)
-            val device = classifyDevice(ip, openPorts, serviceUrl)
+            val device = classifyDevice(ip, openPorts, serviceUrl, gatewayWanIp)
             discovered[ip] = device
             onDeviceFound(device)
         }
@@ -115,7 +142,7 @@ object NetworkCameraScanner {
                                 }
 
                                 if (validDevice) {
-                                    val device = classifyDevice(ip, openPorts, onvifMap[ip])
+                                    val device = classifyDevice(ip, openPorts, onvifMap[ip], gatewayWanIp)
                                     discovered[ip] = device
                                     onDeviceFound(device)
                                 }
@@ -191,12 +218,13 @@ object NetworkCameraScanner {
         }
     }
 
-    private fun classifyDevice(
+    private suspend fun classifyDevice(
         ip: String,
         openPorts: List<Int>,
-        onvifServiceUrl: String?
+        onvifServiceUrl: String?,
+        gatewayWanIp: String? = null
     ): DiscoveredCameraDevice {
-        return when {
+        val baseDevice = when {
             openPorts.contains(10554) || openPorts.contains(10080) -> {
                 DiscoveredCameraDevice(
                     ipAddress = ip,
@@ -214,18 +242,24 @@ object NetworkCameraScanner {
             }
 
             openPorts.contains(8800) -> {
+                val unicast = V380NativeProtocol.queryV380DeviceIdUnicast(ip)
+                val devId = unicast?.deviceId?.ifBlank { null } ?: V380NativeProtocol.queryV380DeviceIdOverTcp(ip, 8800)
+                val mac = unicast?.mac?.ifBlank { null }
+                val devName = if (devId.isNotBlank()) "V380 PRO ($devId)" else "Cámara V380 PRO ($ip)"
+                val hwInfo = if (mac != null) "ID V380: $devId • MAC: $mac" else if (devId.isNotBlank()) "ID V380: $devId" else "V380 Nativo Puerto 8800"
                 DiscoveredCameraDevice(
                     ipAddress = ip,
                     detectedBrand = CameraBrand.V380_PRO,
-                    deviceName = "Cámara V380 PRO ($ip)",
+                    deviceName = devName,
                     openPorts = openPorts,
                     rtspPort = 8800,
                     httpPort = 8800,
                     onvifPort = if (openPorts.contains(8899)) 8899 else 80,
+                    deviceId = devId,
                     onvifServiceUrl = onvifServiceUrl,
                     suggestedMainPath = "/live/ch00_1",
                     suggestedSubPath = "/live/ch00_0",
-                    macOrHardwareInfo = "V380 Nativo Puerto 8800 (${openPorts.joinToString("/")})"
+                    macOrHardwareInfo = hwInfo
                 )
             }
 
@@ -342,6 +376,27 @@ object NetworkCameraScanner {
                 )
             }
         }
+
+        // Automatic UPnP IGD Port Mapping for zero-config remote viewing outside the home
+        if (!gatewayWanIp.isNullOrBlank() && baseDevice.rtspPort > 0) {
+            val octet = ip.substringAfterLast(".").toIntOrNull() ?: 10
+            val preferredExtPort = 10000 + (octet * 10) + (if (baseDevice.rtspPort == 554) 4 else 0)
+            val mapping = UpnpIgdManager.requestPortMapping(
+                internalIp = ip,
+                internalPort = baseDevice.rtspPort,
+                preferredExternalPort = preferredExtPort
+            )
+            if (mapping != null && mapping.success) {
+                return baseDevice.copy(
+                    remoteHost = mapping.externalWanIp,
+                    remoteRtspPort = mapping.externalPort,
+                    remoteHttpPort = baseDevice.httpPort,
+                    upnpMapped = true
+                )
+            }
+            return baseDevice.copy(remoteHost = gatewayWanIp)
+        }
+        return baseDevice
     }
 
     private fun discoverOnvifViaUdpMulticast(): Map<String, String> {
