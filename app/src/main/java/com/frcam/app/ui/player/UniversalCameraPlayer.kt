@@ -12,6 +12,10 @@ import android.util.Base64
 import android.view.Surface
 import android.view.TextureView
 import android.view.ViewGroup
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.annotation.OptIn
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -48,6 +52,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,6 +86,10 @@ import com.frcam.app.model.StreamProtocol
 import com.frcam.app.model.TransportMode
 import com.frcam.app.protocol.NetworkCameraScanner
 import com.frcam.app.protocol.RingCloudClient
+import com.frcam.app.protocol.RingJsBridge
+import com.frcam.app.protocol.RingLiveSession
+import com.frcam.app.protocol.RingWebRtcController
+import com.frcam.app.protocol.RingWebRtcHtml
 import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -416,13 +425,15 @@ private fun RingCloudStreamSurface(
     onManualRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var activeRecordingUrl by remember(camera.id, retryKey) { mutableStateOf<String?>(null) }
     var rawFrame by remember(camera.id, retryKey) { mutableStateOf<Bitmap?>(null) }
     var currentFrame by remember(camera.id, retryKey) { mutableStateOf<Bitmap?>(null) }
     var streamState by remember(camera.id, retryKey) { mutableStateOf(StreamState.CONNECTING) }
-    var statusText by remember(camera.id, retryKey) { mutableStateOf("Conectando con Ring Cloud...") }
+    var statusText by remember(camera.id, retryKey) { mutableStateOf("Conectando con Ring…") }
+    var rtcTicket by remember(camera.id, retryKey) { mutableStateOf<String?>(null) }
+    var rtcLive by remember(camera.id, retryKey) { mutableStateOf(false) }
+    var rtcError by remember(camera.id, retryKey) { mutableStateOf<String?>(null) }
 
-    // Live continuous clock running second by second
+    // Reloj en vivo (un único timestamp en pantalla)
     var liveClockMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(camera.id) {
         while (isActive) {
@@ -430,12 +441,10 @@ private fun RingCloudStreamSurface(
             delay(1000L)
         }
     }
-
     val liveTimestampStr = remember(liveClockMs) {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(liveClockMs))
     }
 
-    // Update frame cleanly without burning duplicate timestamps onto raw bitmap
     LaunchedEffect(rawFrame) {
         val rf = rawFrame ?: return@LaunchedEffect
         currentFrame = rf
@@ -449,95 +458,72 @@ private fun RingCloudStreamSurface(
             statusText = "ID de timbre/cámara Ring inválido"
             return@LaunchedEffect
         }
-        streamState = StreamState.CONNECTING
-        statusText = "Conectando cámara Ring ($doorbotId)..."
 
-        // 1. Fetch initial snapshot IMMEDIATELY so the image appears with ZERO delay
-        val initialFrame = RingCloudClient.fetchDeviceSnapshotWithMeta(doorbotId)
-        if (initialFrame != null) {
-            rawFrame = initialFrame.bitmap
-            currentFrame = initialFrame.bitmap
-            captureHandle.latestBitmapRef = initialFrame.bitmap
-            onResolution("${initialFrame.bitmap.width}x${initialFrame.bitmap.height} (Ring HD)")
+        // 1. Foto inmediata (mientras se negocia el video)
+        RingCloudClient.fetchDeviceSnapshotWithMeta(doorbotId)?.let {
+            rawFrame = it.bitmap
+            onResolution("${it.bitmap.width}x${it.bitmap.height}")
             streamState = StreamState.LIVE
         }
 
-        // 2. Trigger Live View / VOD on Ring Cloud
+        // 2. Despertar cámara + ticket WebRTC (video/audio en tiempo real)
         RingCloudClient.wakeLiveStream(doorbotId)
-
-        // 3. Query for actual recording clip URL from Ring Cloud
-        val recUrl = RingCloudClient.fetchLatestRecordingUrl(doorbotId)
-        if (!recUrl.isNullOrBlank()) {
-            activeRecordingUrl = recUrl
-            onResolution("1080p (Ring Motion HD)")
-            streamState = StreamState.LIVE
+        statusText = "Solicitando sesión en vivo a Ring…"
+        val ticket = RingCloudClient.requestSignalingTicket()
+        if (ticket != null) {
+            rtcTicket = ticket
+            statusText = "Negociando video en vivo…"
+        } else {
+            rtcError = RingCloudClient.lastTicketError
+            statusText = "Sin video en vivo: ${RingCloudClient.lastTicketError}"
         }
 
-        // 4. Continuous high-frequency live stream and snapshot refresh loop
-        var fetchCount = 0
-        while (isActive) {
-            // Check for ready video clip from Ring
-            if (activeRecordingUrl.isNullOrBlank() || fetchCount % 5 == 0) {
-                val rec = RingCloudClient.fetchLatestRecordingUrl(doorbotId)
-                if (!rec.isNullOrBlank() && rec != activeRecordingUrl) {
-                    activeRecordingUrl = rec
-                    onResolution("1080p (Ring Motion HD)")
-                    streamState = StreamState.LIVE
-                }
-            }
-
-            // Continuously refresh fresh live snapshot
-            val ringFrame = RingCloudClient.fetchDeviceSnapshotWithMeta(doorbotId)
-            if (ringFrame != null) {
-                val bmp = ringFrame.bitmap
-                if (rawFrame == null) {
-                    onResolution("${bmp.width}x${bmp.height} (Ring Live)")
-                }
-                rawFrame = bmp
+        // 3. Mientras no haya video en vivo, refrescar la foto
+        while (isActive && !rtcLive) {
+            RingCloudClient.fetchDeviceSnapshotWithMeta(doorbotId)?.let {
+                rawFrame = it.bitmap
                 streamState = StreamState.LIVE
-            } else if (rawFrame == null) {
-                streamState = StreamState.ERROR
-                statusText = "Inicia sesión en el ícono de Ring Cloud (arriba a la derecha)"
             }
-
-            fetchCount++
-            if (fetchCount % 3 == 0) {
-                RingCloudClient.triggerSnapshotUpdate(doorbotId)
-            }
-
-            delay(1200L)
+            RingCloudClient.triggerSnapshotUpdate(doorbotId)
+            delay(2500L)
         }
     }
 
     Box(modifier = modifier) {
-        // Base Layer: Camera photo is ALWAYS rendered. Zero black screen, zero gray boxes, zero play icons!
+        // Capa base: última imagen conocida (nunca pantalla gris/negra)
         currentFrame?.let { bmp ->
             Image(
                 bitmap = bmp.asImageBitmap(),
-                contentDescription = "Ring Live Cloud View",
+                contentDescription = "Ring",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
             )
         }
 
-        // Top Layer: Live H.264 Video stream with Real Sound when clip is ready
-        if (!activeRecordingUrl.isNullOrBlank()) {
-            ExoRtspStreamSurface(
-                streamUrl = activeRecordingUrl!!,
-                forceTcp = false,
+        // Capa WebRTC: transparente hasta que llega el primer cuadro de video
+        val ticket = rtcTicket
+        if (ticket != null && rtcError == null) {
+            RingWebRtcLayer(
+                camera = camera,
+                ticket = ticket,
                 isMuted = isMuted,
-                retryKey = retryKey,
-                captureHandle = captureHandle,
-                onResolution = onResolution,
-                onErrorNextCandidate = {
-                    activeRecordingUrl = null
+                onLive = { res ->
+                    rtcLive = true
+                    streamState = StreamState.LIVE
+                    statusText = "En vivo"
+                    onResolution("$res (Ring en vivo)")
                 },
-                onManualRetry = onManualRetry,
+                onStatus = { if (!rtcLive) statusText = it },
+                onError = { err ->
+                    rtcError = err
+                    rtcLive = false
+                    statusText = err
+                },
+                onFrame = { bmp -> rawFrame = bmp },
                 modifier = Modifier.fillMaxSize()
             )
         }
 
-        // Top-Left Live OSD: Single Blinking Live Badge + Live Date & Time
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -550,10 +536,10 @@ private fun RingCloudStreamSurface(
             Box(
                 modifier = Modifier
                     .size(8.dp)
-                    .background(Color(0xFF22C55E), CircleShape)
+                    .background(if (rtcLive) Color(0xFF22C55E) else Color(0xFFF59E0B), CircleShape)
             )
             Text(
-                text = "LIVE • $liveTimestampStr",
+                text = "${if (rtcLive) "LIVE" else "FOTO"} • $liveTimestampStr",
                 color = Color.White,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -561,23 +547,28 @@ private fun RingCloudStreamSurface(
             )
         }
 
-        // Top-Right Live OSD: Ring Cloud Cam
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(8.dp)
-                .background(Color(0xD0000000), RoundedCornerShape(6.dp))
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-        ) {
+        if (!rtcLive) {
             Text(
-                text = if (!activeRecordingUrl.isNullOrBlank()) "RING VIDEO HD" else "RING CLOUD",
-                color = Color(0xFF38BDF8),
+                text = statusText,
+                color = Color.White,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Bold
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .background(Color(0xB0000000), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
             )
+            if (rtcError != null) {
+                FilledTonalButton(
+                    onClick = onManualRetry,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                ) { Text("Reintentar", fontSize = 11.sp) }
+            }
         }
 
-        if (activeRecordingUrl.isNullOrBlank() && currentFrame == null) {
+        if (currentFrame == null) {
             StreamOverlayState(
                 streamState = streamState,
                 streamUrl = "Ring Cloud (${camera.deviceId})",
@@ -586,6 +577,86 @@ private fun RingCloudStreamSurface(
             )
         }
     }
+}
+
+@Composable
+private fun RingWebRtcLayer(
+    camera: CameraConfig,
+    ticket: String,
+    isMuted: Boolean,
+    onLive: (String) -> Unit,
+    onStatus: (String) -> Unit,
+    onError: (String) -> Unit,
+    onFrame: (Bitmap) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val doorbotId = camera.deviceId.trim().filter(Char::isDigit).toLongOrNull() ?: 0L
+    val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    var webViewRef by remember(ticket) { mutableStateOf<WebView?>(null) }
+    val currentOnLive by rememberUpdatedState(onLive)
+    val currentOnStatus by rememberUpdatedState(onStatus)
+    val currentOnError by rememberUpdatedState(onError)
+    val currentOnFrame by rememberUpdatedState(onFrame)
+
+    val session = remember(ticket) {
+        RingLiveSession(
+            doorbotId = doorbotId,
+            ticket = ticket,
+            onStatus = { s -> mainHandler.post { currentOnStatus(s) } },
+            onAnswer = { sdp -> webViewRef?.let { RingWebRtcController.deliverAnswer(it, sdp) } },
+            onRemoteIce = { c, i -> webViewRef?.let { RingWebRtcController.deliverIce(it, c, i) } },
+            onFailed = { e -> mainHandler.post { currentOnError(e) } }
+        )
+    }
+
+    LaunchedEffect(isMuted) { RingWebRtcController.setSpeakerMuted(isMuted) }
+
+    DisposableEffect(session) {
+        session.connect()
+        onDispose {
+            RingWebRtcController.unregister(camera.id)
+            session.close()
+            webViewRef?.destroy()
+            webViewRef = null
+        }
+    }
+
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            WebView(ctx).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                settings.javaScriptEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                settings.domStorageEnabled = true
+                webChromeClient = object : WebChromeClient() {
+                    override fun onPermissionRequest(request: PermissionRequest?) {
+                        request?.let { r -> mainHandler.post { r.grant(r.resources) } }
+                    }
+                }
+                webViewClient = WebViewClient()
+                addJavascriptInterface(
+                    RingJsBridge(
+                        session = session,
+                        liveCb = { res -> mainHandler.post { currentOnLive(res) } },
+                        statusCb = { s -> mainHandler.post { currentOnStatus(s) } },
+                        failCb = { e -> mainHandler.post { currentOnError(e) } },
+                        frameCb = { bmp -> mainHandler.post { currentOnFrame(bmp) } }
+                    ),
+                    "AndroidRing"
+                )
+                RingWebRtcController.register(camera.id, this)
+                webViewRef = this
+                loadDataWithBaseURL(
+                    "https://app.frcam.local/",
+                    RingWebRtcHtml.build(isMuted),
+                    "text/html",
+                    "UTF-8",
+                    null
+                )
+            }
+        }
+    )
 }
 
 @Composable

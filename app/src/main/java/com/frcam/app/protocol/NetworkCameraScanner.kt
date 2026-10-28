@@ -11,11 +11,13 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
+import java.net.URL
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -114,6 +116,19 @@ object NetworkCameraScanner {
             onDeviceFound(device)
         }
 
+        onProgress(0.19f, "Buscando dispositivos SSDP/UPnP (Hikvision, Dahua, Foscam, Axis, Reolink...)...")
+        val ssdpDevices = discoverSsdpCameras()
+        for ((ip, info) in ssdpDevices) {
+            if (ip == localIp || discovered.containsKey(ip)) continue
+            val ports = probeCameraPorts(ip, timeoutMs = 300)
+            val dev = classifyDevice(ip, ports, onvifMap[ip], gatewayWanIp)
+            val named = dev.copy(
+                deviceName = info.friendlyName.ifBlank { dev.deviceName },
+                macOrHardwareInfo = "SSDP: ${info.summary}"
+            )
+            discovered[ip] = named
+            onDeviceFound(named)
+        }
         onProgress(0.22f, "Escaneando puertos Eye4 (10554), V380 (8800), V720 (6123) y RTSP en $subnetPrefix.1-254...")
 
         val semaphore = Semaphore(48)
@@ -131,7 +146,7 @@ object NetworkCameraScanner {
                         val openPorts = probeCameraPorts(ip, timeoutMs = 220)
                         if (openPorts.isNotEmpty()) {
                             val isCameraCandidate = openPorts.any {
-                                it in listOf(10554, 10080, 8800, 8899, 6123, 554, 8554, 2020, 8000, 81)
+                                it in listOf(10554, 10080, 8800, 8899, 6123, 554, 8554, 2020, 8000, 81, 37777, 34567, 8081, 88, 7070)
                             } || openPorts.contains(8080) || openPorts.contains(80)
 
                             if (isCameraCandidate) {
@@ -170,7 +185,7 @@ object NetworkCameraScanner {
 
     private fun probeCameraPorts(ip: String, timeoutMs: Int): List<Int> {
         val open = mutableListOf<Int>()
-        val primaryPorts = listOf(10554, 8800, 6123, 554, 8899, 10080, 8554, 2020, 8000, 81, 8080)
+        val primaryPorts = listOf(10554, 8800, 6123, 554, 8899, 10080, 8554, 2020, 8000, 81, 8080, 37777, 34567, 8081, 88, 7070)
         for (port in primaryPorts) {
             if (isTcpPortOpen(ip, port, timeoutMs)) {
                 open.add(port)
@@ -224,7 +239,7 @@ object NetworkCameraScanner {
         onvifServiceUrl: String?,
         gatewayWanIp: String? = null
     ): DiscoveredCameraDevice {
-        val baseDevice = when {
+        val coarseDevice = when {
             openPorts.contains(10554) || openPorts.contains(10080) -> {
                 DiscoveredCameraDevice(
                     ipAddress = ip,
@@ -377,6 +392,7 @@ object NetworkCameraScanner {
             }
         }
 
+        val baseDevice = refineWithFingerprint(coarseDevice)
         // Automatic UPnP IGD Port Mapping for zero-config remote viewing outside the home
         if (!gatewayWanIp.isNullOrBlank() && baseDevice.rtspPort > 0) {
             val octet = ip.substringAfterLast(".").toIntOrNull() ?: 10
@@ -387,10 +403,17 @@ object NetworkCameraScanner {
                 preferredExternalPort = preferredExtPort
             )
             if (mapping != null && mapping.success) {
+                val httpMap = if (baseDevice.httpPort > 0 && baseDevice.httpPort != baseDevice.rtspPort) {
+                    UpnpIgdManager.requestPortMapping(
+                        internalIp = ip,
+                        internalPort = baseDevice.httpPort,
+                        preferredExternalPort = 20000 + (octet * 10) + (baseDevice.httpPort % 10)
+                    )
+                } else null
                 return baseDevice.copy(
                     remoteHost = mapping.externalWanIp,
                     remoteRtspPort = mapping.externalPort,
-                    remoteHttpPort = baseDevice.httpPort,
+                    remoteHttpPort = if (httpMap != null && httpMap.success) httpMap.externalPort else baseDevice.httpPort,
                     upnpMapped = true
                 )
             }
@@ -399,6 +422,157 @@ object NetworkCameraScanner {
         return baseDevice
     }
 
+    private data class SsdpInfo(val friendlyName: String, val summary: String)
+
+    private val cameraTokens = listOf(
+        "camera", "ipcam", "netcam", "onvif", "hikvision", "dahua", "foscam", "axis", "reolink",
+        "amcrest", "uniview", "hanwha", "vivotek", "ezviz", "tapo", "nvr", "dvr", "webcam", "imou", "wyze", "xmeye"
+    )
+
+    /** SSDP M-SEARCH: detecta dispositivos UPnP que se identifican como cámara/NVR. */
+    private fun discoverSsdpCameras(): Map<String, SsdpInfo> {
+        val locations = mutableMapOf<String, String>()
+        val raw = mutableMapOf<String, String>()
+        try {
+            DatagramSocket().use { socket ->
+                socket.soTimeout = 400
+                val msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n")
+                    .toByteArray()
+                val addr = InetAddress.getByName("239.255.255.250")
+                repeat(2) { socket.send(DatagramPacket(msg, msg.size, addr, 1900)) }
+                val buf = ByteArray(4096)
+                val deadline = System.currentTimeMillis() + 1800L
+                while (System.currentTimeMillis() < deadline) {
+                    try {
+                        val p = DatagramPacket(buf, buf.size)
+                        socket.receive(p)
+                        val ip = p.address?.hostAddress ?: continue
+                        val text = String(p.data, 0, p.length)
+                        raw[ip] = (raw[ip].orEmpty() + "\n" + text)
+                        Regex("(?im)^location:\\s*(\\S+)").find(text)?.groupValues?.get(1)?.let { locations[ip] = it }
+                    } catch (_: java.net.SocketTimeoutException) {
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        val result = mutableMapOf<String, SsdpInfo>()
+        for ((ip, text) in raw) {
+            var name = ""
+            var summary = text.lowercase()
+            locations[ip]?.let { loc ->
+                try {
+                    val c = (URL(loc).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 600
+                        readTimeout = 800
+                    }
+                    val xml = c.inputStream.bufferedReader().readText().take(6000)
+                    c.disconnect()
+                    name = Regex("<friendlyName>(.*?)</friendlyName>").find(xml)?.groupValues?.get(1).orEmpty()
+                    val maker = Regex("<manufacturer>(.*?)</manufacturer>").find(xml)?.groupValues?.get(1).orEmpty()
+                    val model = Regex("<modelName>(.*?)</modelName>").find(xml)?.groupValues?.get(1).orEmpty()
+                    summary = "$name $maker $model ${text}".lowercase()
+                    if (name.isNotBlank() && maker.isNotBlank() && !name.contains(maker, true)) name = "$name ($maker)"
+                } catch (_: Exception) {
+                }
+            }
+            if (cameraTokens.any { summary.contains(it) }) {
+                result[ip] = SsdpInfo(name, summary.replace(Regex("\\s+"), " ").take(90))
+            }
+        }
+        return result
+    }
+
+    /** Lee cabecera Server / WWW-Authenticate / título HTML y RTSP OPTIONS para identificar la marca. */
+    private fun fingerprint(ip: String, openPorts: List<Int>): String {
+        val sb = StringBuilder()
+        for (p in listOf(80, 8080, 81, 88, 8081, 2020)) {
+            if (p !in openPorts) continue
+            try {
+                val c = (URL("http://$ip:$p/").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 700
+                    readTimeout = 900
+                    instanceFollowRedirects = false
+                }
+                val code = c.responseCode
+                sb.append(c.getHeaderField("Server").orEmpty()).append(' ')
+                sb.append(c.getHeaderField("WWW-Authenticate").orEmpty()).append(' ')
+                val stream = if (code < 400) c.inputStream else c.errorStream
+                if (stream != null) {
+                    val buf = ByteArray(2048)
+                    val n = stream.read(buf)
+                    if (n > 0) sb.append(String(buf, 0, n))
+                }
+                c.disconnect()
+            } catch (_: Exception) {
+            }
+        }
+        if (554 in openPorts) {
+            try {
+                Socket().use { s ->
+                    s.soTimeout = 700
+                    s.connect(InetSocketAddress(ip, 554), 500)
+                    s.getOutputStream().write("OPTIONS rtsp://$ip:554/ RTSP/1.0\r\nCSeq: 1\r\n\r\n".toByteArray())
+                    val buf = ByteArray(512)
+                    val n = s.getInputStream().read(buf)
+                    if (n > 0) sb.append(String(buf, 0, n))
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return sb.toString().lowercase()
+    }
+
+    private fun refineWithFingerprint(d: DiscoveredCameraDevice): DiscoveredCameraDevice {
+        if (d.detectedBrand == CameraBrand.V380_PRO && d.deviceId.isNotBlank()) return d
+        val ports = d.openPorts
+        val fp = fingerprint(d.ipAddress, ports)
+        return when {
+            37777 in ports || fp.contains("dahua") || fp.contains("amcrest") || fp.contains("lorex") -> d.copy(
+                detectedBrand = CameraBrand.DAHUA,
+                deviceName = "Cámara Dahua / Amcrest (${d.ipAddress})",
+                rtspPort = 554,
+                suggestedMainPath = "/cam/realmonitor?channel=1&subtype=0",
+                suggestedSubPath = "/cam/realmonitor?channel=1&subtype=1"
+            )
+            fp.contains("hikvision") || fp.contains("dnvrs-webs") || fp.contains("app-webs") || fp.contains("hikvision") -> d.copy(
+                detectedBrand = CameraBrand.HIKVISION,
+                deviceName = "Cámara Hikvision (${d.ipAddress})",
+                rtspPort = 554,
+                suggestedMainPath = "/Streaming/Channels/101",
+                suggestedSubPath = "/Streaming/Channels/102"
+            )
+            fp.contains("reolink") -> d.copy(
+                detectedBrand = CameraBrand.REOLINK,
+                deviceName = "Cámara Reolink (${d.ipAddress})",
+                rtspPort = 554,
+                suggestedMainPath = "/h264Preview_01_main",
+                suggestedSubPath = "/h264Preview_01_sub"
+            )
+            fp.contains("ezviz") -> d.copy(detectedBrand = CameraBrand.EZVIZ, deviceName = "Cámara EZVIZ (${d.ipAddress})")
+            fp.contains("tapo") || fp.contains("tp-link") -> d.copy(
+                detectedBrand = CameraBrand.TPLINK_TAPO,
+                deviceName = "Cámara TP-Link Tapo (${d.ipAddress})",
+                suggestedMainPath = "/stream1",
+                suggestedSubPath = "/stream2"
+            )
+            fp.contains("ip webcam") || fp.contains("ipwebcam") -> d.copy(
+                detectedBrand = CameraBrand.ANDROID_IP_WEBCAM,
+                deviceName = "Android IP Webcam (${d.ipAddress})"
+            )
+            34567 in ports || fp.contains("xmeye") || fp.contains("netsurveillance") -> d.copy(
+                detectedBrand = CameraBrand.ONVIF_GENERIC,
+                deviceName = "Cámara XMEye / NetSurveillance (${d.ipAddress})",
+                rtspPort = 554,
+                suggestedMainPath = "/user=admin&password=&channel=1&stream=0.sdp?",
+                suggestedSubPath = "/user=admin&password=&channel=1&stream=1.sdp?"
+            )
+            fp.contains("foscam") -> d.copy(detectedBrand = CameraBrand.ONVIF_GENERIC, deviceName = "Cámara Foscam (${d.ipAddress})", suggestedMainPath = "/videoMain", suggestedSubPath = "/videoSub")
+            fp.contains("axis") -> d.copy(detectedBrand = CameraBrand.ONVIF_GENERIC, deviceName = "Cámara Axis (${d.ipAddress})", suggestedMainPath = "/axis-media/media.amp", suggestedSubPath = "/axis-media/media.amp?resolution=640x480")
+            fp.contains("uniview") || fp.contains("hanwha") || fp.contains("vivotek") -> d.copy(detectedBrand = CameraBrand.ONVIF_GENERIC, deviceName = "Cámara IP ONVIF (${d.ipAddress})")
+            else -> d
+        }
+    }
     private fun discoverOnvifViaUdpMulticast(): Map<String, String> {
         val result = mutableMapOf<String, String>()
         val messageId = UUID.randomUUID().toString()

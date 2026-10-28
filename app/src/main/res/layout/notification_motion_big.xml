@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <TextView
+        android:id="@+id/motion_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="12dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="4dp"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="?android:attr/textColorPrimary"
+        android:maxLines="2" />
+
+    <ViewFlipper
+        android:id="@+id/motion_flipper"
+        android:layout_width="match_parent"
+        android:layout_height="190dp"
+        android:autoStart="true"
+        android:flipInterval="320"
+        android:inAnimation="@null"
+        android:outAnimation="@null">
+
+        <ImageView android:id="@+id/motion_f0" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+        <ImageView android:id="@+id/motion_f1" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+        <ImageView android:id="@+id/motion_f2" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+        <ImageView android:id="@+id/motion_f3" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+        <ImageView android:id="@+id/motion_f4" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+        <ImageView android:id="@+id/motion_f5" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" />
+    </ViewFlipper>
+</LinearLayout>

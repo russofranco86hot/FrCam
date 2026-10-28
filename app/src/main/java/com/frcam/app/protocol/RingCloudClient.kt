@@ -209,6 +209,54 @@ object RingCloudClient {
 
     private val activeLiveDings = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
+    /**
+     * Solicita el ticket de señalización WebRTC (mismo endpoint que usa la app oficial / python-ring-doorbell).
+     * Devuelve el ticket o null; el motivo del fallo queda en [lastTicketError].
+     */
+    @Volatile
+    var lastTicketError: String = ""
+
+    suspend fun requestSignalingTicket(): String? = withContext(Dispatchers.IO) {
+        val accessToken = ensureValidAccessToken()
+        if (accessToken == null) {
+            lastTicketError = "Sin sesión Ring (inicia sesión en el ícono de Ring Cloud)"
+            return@withContext null
+        }
+        val endpoints = listOf(
+            "https://prd-api-us.prd.rings.solutions/api/v1/clap/ticket/request/signalsocket",
+            "https://api.ring.com/api/v1/clap/ticket/request/signalsocket"
+        )
+        for (endpoint in endpoints) {
+            try {
+                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 6000
+                    readTimeout = 6000
+                    requestMethod = "POST"
+                    doOutput = true
+                    setFixedLengthStreamingMode(0)
+                    setRequestProperty("Authorization", "Bearer $accessToken")
+                    setRequestProperty("User-Agent", "android:com.ringapp")
+                    setRequestProperty("hardware_id", hardwareId)
+                    setRequestProperty("Accept", "application/json")
+                }
+                conn.outputStream.close()
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val ticket = JSONObject(conn.inputStream.bufferedReader().readText()).optString("ticket")
+                    conn.disconnect()
+                    if (ticket.isNotBlank()) return@withContext ticket
+                    lastTicketError = "Ring devolvió ticket vacío"
+                } else {
+                    lastTicketError = "Ticket Ring HTTP $code"
+                    conn.disconnect()
+                }
+            } catch (e: Exception) {
+                lastTicketError = "Ticket Ring: ${e.localizedMessage}"
+            }
+        }
+        null
+    }
+
     suspend fun wakeLiveStream(doorbotId: Long): Boolean = withContext(Dispatchers.IO) {
         val accessToken = ensureValidAccessToken() ?: return@withContext false
         var ok = false

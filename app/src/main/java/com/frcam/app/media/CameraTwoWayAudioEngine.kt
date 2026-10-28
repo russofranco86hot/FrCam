@@ -12,6 +12,7 @@ import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
+import com.frcam.app.protocol.RingWebRtcController
 import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -191,6 +192,13 @@ class CameraIntercomBroadcaster(private val context: Context) {
     ) {
         if (_isBroadcasting.value) return
 
+        if (camera.isRingCloudNative()) {
+            // El micrófono de Ring viaja por la pista WebRTC del WebView (sin AudioRecord propio)
+            _isBroadcasting.value = true
+            RingWebRtcController.setMicrophoneEnabled(camera.id, true)
+            return
+        }
+
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             onError("Se requiere permiso de Micrófono para hablar por la cámara")
             return
@@ -261,6 +269,7 @@ class CameraIntercomBroadcaster(private val context: Context) {
     fun stopBroadcasting() {
         _isBroadcasting.value = false
         _voiceAmplitude.value = 0f
+        RingWebRtcController.setMicrophoneEnabled(null, false)
         recordJob?.cancel()
         recordJob = null
         try {

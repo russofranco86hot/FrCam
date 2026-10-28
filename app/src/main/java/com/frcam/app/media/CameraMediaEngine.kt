@@ -156,46 +156,102 @@ object CameraMediaEngine {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val savedGifUri = gifFile?.let { saveGifToGallery(context, cameraName, it) }
+
         val builder = NotificationCompat.Builder(context, MOTION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle("🚨 Movimiento detectado: $cameraName")
-            .setContentText("A las $timeStr (${"%.1f".format(motionPercent)}% actividad) • Clip animado disponible")
+            .setContentText("A las $timeStr (${"%.1f".format(motionPercent)}% actividad) • Clip animado")
             .setLargeIcon(stampedBitmap)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
 
-        val bigPicStyle = NotificationCompat.BigPictureStyle()
-            .bigLargeIcon(null as Bitmap?)
-            .setSummaryText("$cameraName • $timeStr (Clip animado)")
-
-        if (gifFile != null && gifFile.exists()) {
-            try {
-                val uri = androidx.core.content.FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    gifFile
+        // Vista expandida ANIMADA: ViewFlipper con los cuadros del movimiento (Android no anima GIF en BigPicture)
+        var expandedAnimated = false
+        try {
+            val picks = pickEvenly(framesForGif, 6)
+            if (picks.isNotEmpty()) {
+                val big = android.widget.RemoteViews(context.packageName, com.frcam.app.R.layout.notification_motion_big)
+                big.setTextViewText(
+                    com.frcam.app.R.id.motion_title,
+                    "$cameraName • $timeStr • ${"%.1f".format(motionPercent)}% actividad"
                 )
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val icon = android.graphics.drawable.Icon.createWithContentUri(uri)
-                    bigPicStyle.bigPicture(icon)
-                } else {
-                    bigPicStyle.bigPicture(stampedBitmap)
+                val ids = intArrayOf(
+                    com.frcam.app.R.id.motion_f0, com.frcam.app.R.id.motion_f1, com.frcam.app.R.id.motion_f2,
+                    com.frcam.app.R.id.motion_f3, com.frcam.app.R.id.motion_f4, com.frcam.app.R.id.motion_f5
+                )
+                for (i in ids.indices) {
+                    val src = picks[i % picks.size]
+                    val w = 400
+                    val h = (w * src.height / src.width.toFloat()).toInt().coerceAtLeast(1)
+                    big.setImageViewBitmap(ids[i], Bitmap.createScaledBitmap(src, w, h, true))
                 }
-            } catch (_: Exception) {
-                bigPicStyle.bigPicture(stampedBitmap)
+                builder.setStyle(NotificationCompat.DecoratedCustomViewStyle())
+                builder.setCustomBigContentView(big)
+                expandedAnimated = true
             }
-        } else {
-            bigPicStyle.bigPicture(stampedBitmap)
+        } catch (_: Exception) {
+        }
+        if (!expandedAnimated) {
+            builder.setStyle(
+                NotificationCompat.BigPictureStyle()
+                    .bigPicture(stampedBitmap)
+                    .bigLargeIcon(null as Bitmap?)
+                    .setSummaryText("$cameraName • $timeStr")
+            )
         }
 
-        builder.setStyle(bigPicStyle)
+        if (savedGifUri != null) {
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(savedGifUri, "image/gif")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val viewPending = PendingIntent.getActivity(
+                context,
+                savedGifUri.hashCode(),
+                viewIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_menu_gallery, "Ver GIF", viewPending)
+        }
 
         NotificationManagerCompat.from(context)
             .notify(cameraId.hashCode() xor Random.Default.nextInt(1, 9999), builder.build())
     }
 
+    private fun pickEvenly(frames: List<Bitmap>, count: Int): List<Bitmap> {
+        if (frames.size <= count) return frames
+        return List(count) { i -> frames[i * (frames.size - 1) / (count - 1)] }
+    }
+
+    /** Guarda el GIF del movimiento en Galería (Pictures/FrCam/Movimientos). */
+    fun saveGifToGallery(context: Context, cameraName: String, gifFile: File): android.net.Uri? {
+        return try {
+            val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+            val safeName = cameraName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "FrCam_${safeName}_${sdf.format(Date())}.gif")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/gif")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/FrCam/Movimientos")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+            resolver.openOutputStream(uri)?.use { out -> gifFile.inputStream().use { it.copyTo(out) } }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+            uri
+        } catch (_: Exception) {
+            null
+        }
+    }
     private fun stampBitmapWithOverlay(source: Bitmap, cameraName: String): Bitmap {
         return try {
             val copy = source.copy(Bitmap.Config.ARGB_8888, true)

@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -14,23 +15,37 @@ android {
         applicationId = "com.frcam.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 6
+        versionName = "1.0.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
 
+    signingConfigs {
+        create("frcam") {
+            val props = Properties()
+            val f = rootProject.file("keystore.properties")
+            if (f.exists()) f.inputStream().use { props.load(it) }
+            storeFile = file(props.getProperty("storeFile", "../keystore/frcam.keystore"))
+            storePassword = props.getProperty("storePassword", "android")
+            keyAlias = props.getProperty("keyAlias", "androiddebugkey")
+            keyPassword = props.getProperty("keyPassword", "android")
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            signingConfig = signingConfigs.getByName("frcam")
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
         }
         debug {
+            signingConfig = signingConfigs.getByName("frcam")
             isDebuggable = true
         }
     }
