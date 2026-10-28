@@ -335,6 +335,7 @@ data class CameraConfig(
         if (isV380NativeProtocol() || brand == CameraBrand.V380_PRO) return true
         if (brand == CameraBrand.EYE4_VSTARCAM) return true
         if (brand == CameraBrand.ONVIF_GENERIC || brand == CameraBrand.HIKVISION || brand == CameraBrand.DAHUA) return true
+        if (brand == CameraBrand.REOLINK || brand == CameraBrand.TPLINK_TAPO || brand == CameraBrand.EZVIZ) return true
         return false
     }
 

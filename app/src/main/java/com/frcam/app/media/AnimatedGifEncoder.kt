@@ -39,7 +39,8 @@ class AnimatedGifEncoder {
         return try {
             writeString("GIF89a")
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.printStackTrace()
             false
         }
     }
@@ -51,9 +52,23 @@ class AnimatedGifEncoder {
                 im.copy(Bitmap.Config.ARGB_8888, false)
             } else im
 
-            width = bmp.width
-            height = bmp.height
-            getImagePixels(bmp)
+            val w = bmp.width
+            val h = bmp.height
+            val rgb = IntArray(w * h)
+            bmp.getPixels(rgb, 0, w, 0, 0, w, h)
+            addFrame(rgb, w, h)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    fun addFrame(rgb: IntArray, w: Int, h: Int): Boolean {
+        if (out == null) return false
+        return try {
+            width = w
+            height = h
+            setPixelsFromRgb(rgb)
             analyzePixels()
 
             if (firstFrame) {
@@ -72,7 +87,8 @@ class AnimatedGifEncoder {
             writePixels()
             firstFrame = false
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.printStackTrace()
             false
         }
     }
@@ -93,11 +109,7 @@ class AnimatedGifEncoder {
         return ok
     }
 
-    private fun getImagePixels(bmp: Bitmap) {
-        val w = bmp.width
-        val h = bmp.height
-        val rgb = IntArray(w * h)
-        bmp.getPixels(rgb, 0, w, 0, 0, w, h)
+    private fun setPixelsFromRgb(rgb: IntArray) {
         pixels = ByteArray(rgb.size * 3)
         var count = 0
         for (color in rgb) {
@@ -199,7 +211,7 @@ class AnimatedGifEncoder {
     }
 
     /**
-     * NeuQuant Neural-Net Quantization Algorithm by Anthony Dekker.
+     * NeuQuant Neural-Net Quantization Algorithm (Bounded & Safe)
      */
     private class NeuQuant(thepic: ByteArray, len: Int, sample: Int) {
         private val network = Array(256) { DoubleArray(4) }
@@ -208,13 +220,14 @@ class AnimatedGifEncoder {
         private val freq = DoubleArray(256)
         private val thepicture: ByteArray = thepic
         private val lengthcount: Int = len
-        private val samplefac: Int = sample
 
         init {
             for (i in 0 until 256) {
-                network[i][0] = ((i shl 4) or (i shr 4)).toDouble()
-                network[i][1] = network[i][0]
-                network[i][2] = network[i][0]
+                val v = i.toDouble()
+                network[i][0] = v
+                network[i][1] = v
+                network[i][2] = v
+                network[i][3] = v
                 freq[i] = 1.0 / 256.0
                 bias[i] = 0.0
             }
@@ -231,7 +244,8 @@ class AnimatedGifEncoder {
             val map = ByteArray(3 * 256)
             val index = IntArray(256)
             for (i in 0 until 256) {
-                index[network[i][3].toInt()] = i
+                val idx = network[i][3].toInt().coerceIn(0, 255)
+                index[idx] = i
             }
             var k = 0
             for (i in 0 until 256) {
@@ -249,12 +263,13 @@ class AnimatedGifEncoder {
             for (i in 0 until 256) {
                 val p = network[i]
                 var smallpos = i
-                var smallval = p[1].toInt()
+                var smallval = p[1].toInt().coerceIn(0, 255)
                 for (j in i + 1 until 256) {
                     val q = network[j]
-                    if (q[1].toInt() < smallval) {
+                    val qVal = q[1].toInt().coerceIn(0, 255)
+                    if (qVal < smallval) {
                         smallpos = j
-                        smallval = q[1].toInt()
+                        smallval = qVal
                     }
                 }
                 val q = network[smallpos]
@@ -266,7 +281,7 @@ class AnimatedGifEncoder {
                     }
                 }
                 if (smallval != previouscol) {
-                    netindex[previouscol] = (startpos + i) shr 1
+                    netindex[previouscol] = ((startpos + i) shr 1).coerceIn(0, 255)
                     for (j in previouscol + 1 until smallval) {
                         netindex[j] = i
                     }
@@ -274,45 +289,45 @@ class AnimatedGifEncoder {
                     startpos = i
                 }
             }
-            netindex[previouscol] = (startpos + 255) shr 1
+            netindex[previouscol.coerceIn(0, 255)] = ((startpos + 255) shr 1).coerceIn(0, 255)
             for (j in previouscol + 1 until 256) {
                 netindex[j] = 255
             }
         }
 
         private fun learn() {
-            val nCycles = 100
-            val step = if (lengthcount < 1500) 1 else 3 * samplefac
+            val nCycles = (lengthcount / 9).coerceIn(100, 2000)
+            val step = if (lengthcount < 1500) 1 else (lengthcount / nCycles).coerceAtLeast(3)
             var pix = 0
             val lim = lengthcount - 3
 
             for (i in 0 until nCycles) {
                 if (pix > lim) pix = 0
-                val b = thepicture[pix++].toInt() and 0xFF
-                val g = thepicture[pix++].toInt() and 0xFF
                 val r = thepicture[pix++].toInt() and 0xFF
+                val g = thepicture[pix++].toInt() and 0xFF
+                val b = thepicture[pix++].toInt() and 0xFF
 
-                var best = contest(b, g, r)
-                altersingle(1.0 / (1.0 + (i.toDouble() / 10.0)), best, b, g, r)
+                val best = contest(r, g, b)
+                altersingle(1.0 / (1.0 + (i.toDouble() / 20.0)), best, r, g, b)
                 pix += step
             }
         }
 
-        private fun altersingle(alpha: Double, i: Int, b: Int, g: Int, r: Int) {
-            network[i][0] -= alpha * (network[i][0] - b)
-            network[i][1] -= alpha * (network[i][1] - g)
-            network[i][2] -= alpha * (network[i][2] - r)
+        private fun altersingle(alpha: Double, i: Int, r: Int, g: Int, b: Int) {
+            network[i][0] = (network[i][0] - alpha * (network[i][0] - r)).coerceIn(0.0, 255.0)
+            network[i][1] = (network[i][1] - alpha * (network[i][1] - g)).coerceIn(0.0, 255.0)
+            network[i][2] = (network[i][2] - alpha * (network[i][2] - b)).coerceIn(0.0, 255.0)
         }
 
-        private fun contest(b: Int, g: Int, r: Int): Int {
+        private fun contest(r: Int, g: Int, b: Int): Int {
             var bestd = Double.MAX_VALUE
             var bestbiasd = bestd
-            var best = -1
+            var best = 0
             var bestpos = best
 
             for (i in 0 until 256) {
                 val n = network[i]
-                val dist = abs(n[0] - b) + abs(n[1] - g) + abs(n[2] - r)
+                val dist = abs(n[0] - r) + abs(n[1] - g) + abs(n[2] - b)
                 if (dist < bestd) {
                     bestd = dist
                     best = i
@@ -336,10 +351,11 @@ class AnimatedGifEncoder {
             }
         }
 
-        fun map(b: Int, g: Int, r: Int): Int {
-            var bestd = 1000.0
-            var best = -1
-            var i = netindex[g]
+        fun map(r: Int, g: Int, b: Int): Int {
+            var bestd = 100000.0
+            var best = 0
+            val gClamped = g.coerceIn(0, 255)
+            var i = netindex[gClamped]
             var j = i - 1
 
             while (i < 256 || j >= 0) {
@@ -351,11 +367,11 @@ class AnimatedGifEncoder {
                     } else {
                         i++
                         if (dist < 0) dist = -dist
-                        var a = n[0] - b
+                        var a = n[0] - r
                         if (a < 0) a = -a
                         dist += a
                         if (dist < bestd) {
-                            a = n[2] - r
+                            a = n[2] - b
                             if (a < 0) a = -a
                             dist += a
                             if (dist < bestd) {
@@ -373,11 +389,11 @@ class AnimatedGifEncoder {
                     } else {
                         j--
                         if (dist < 0) dist = -dist
-                        var a = n[0] - b
+                        var a = n[0] - r
                         if (a < 0) a = -a
                         dist += a
                         if (dist < bestd) {
-                            a = n[2] - r
+                            a = n[2] - b
                             if (a < 0) a = -a
                             dist += a
                             if (dist < bestd) {
@@ -415,9 +431,18 @@ class AnimatedGifEncoder {
         private val codetab = IntArray(5003)
         private var curPixel = 0
 
+        private var g_init_bits = 0
+        private var n_bits = 0
+        private var maxcode = 0
+        private var clear_flg = false
+        private var ClearCode = 0
+        private var EOFCode = 0
+        private var free_ent = 0
+
         fun encode(outs: OutputStream) {
             outs.write(initCodeSize)
-            compress(initCodeSize + 1, outs)
+            g_init_bits = initCodeSize + 1
+            compress(g_init_bits, outs)
             outs.write(0) // Empty block packet
         }
 
@@ -435,7 +460,12 @@ class AnimatedGifEncoder {
         }
 
         private fun output(code: Int, outs: OutputStream) {
-            cur_accum = cur_accum or (code shl cur_bits)
+            cur_accum = cur_accum and masks[cur_bits]
+            if (cur_bits > 0) {
+                cur_accum = cur_accum or (code shl cur_bits)
+            } else {
+                cur_accum = code
+            }
             cur_bits += n_bits
 
             while (cur_bits >= 8) {
@@ -446,6 +476,7 @@ class AnimatedGifEncoder {
 
             if (free_ent > maxcode || clear_flg) {
                 if (clear_flg) {
+                    n_bits = g_init_bits
                     maxcode = (1 shl n_bits) - 1
                     clear_flg = false
                 } else {
@@ -464,13 +495,6 @@ class AnimatedGifEncoder {
             }
         }
 
-        private var n_bits = 0
-        private var maxcode = 0
-        private var clear_flg = false
-        private var ClearCode = 0
-        private var EOFCode = 0
-        private var free_ent = 0
-
         private fun compress(init_bits: Int, outs: OutputStream) {
             n_bits = init_bits
             maxcode = (1 shl n_bits) - 1
@@ -478,6 +502,7 @@ class AnimatedGifEncoder {
             EOFCode = ClearCode + 1
             free_ent = ClearCode + 2
             clear_flg = false
+            curPixel = 0
 
             var ent = nextPixel()
             var hshift = 0

@@ -203,15 +203,51 @@ object CameraMediaEngine {
             )
         }
 
-        if (savedGifUri != null) {
+        val contentUri: android.net.Uri? = if (gifFile != null && gifFile.exists()) {
+            try {
+                androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    gifFile
+                )
+            } catch (_: Exception) {
+                null
+            }
+        } else null
+
+        val targetUri = contentUri ?: savedGifUri
+        if (targetUri != null) {
+            // Grant explicit URI read permission to Samsung Gallery and Google Photos packages
+            if (contentUri != null) {
+                val packagesToGrant = listOf(
+                    "com.sec.android.gallery3d",
+                    "com.google.android.apps.photos",
+                    "com.android.gallery3d",
+                    "com.google.android.gallery3d"
+                )
+                for (pkg in packagesToGrant) {
+                    try {
+                        context.grantUriPermission(pkg, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    } catch (_: Exception) {}
+                }
+            }
+
             val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(savedGifUri, "image/gif")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                setDataAndType(targetUri, "image/gif")
+                clipData = android.content.ClipData.newRawUri("FrCam Motion GIF", targetUri)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+            }
+            val chooser = Intent.createChooser(viewIntent, "Ver GIF de movimiento").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             val viewPending = PendingIntent.getActivity(
                 context,
-                savedGifUri.hashCode(),
-                viewIntent,
+                targetUri.hashCode(),
+                chooser,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             builder.addAction(android.R.drawable.ic_menu_gallery, "Ver GIF", viewPending)
@@ -226,27 +262,56 @@ object CameraMediaEngine {
         return List(count) { i -> frames[i * (frames.size - 1) / (count - 1)] }
     }
 
-    /** Guarda el GIF del movimiento en Galería (Pictures/FrCam/Movimientos). */
+    /** Guarda el GIF del movimiento en Galería (Pictures/FrCam/Movimientos) e indexa para Samsung y Google Photos. */
     fun saveGifToGallery(context: Context, cameraName: String, gifFile: File): android.net.Uri? {
         return try {
+            val nowMs = System.currentTimeMillis()
+            val nowSec = nowMs / 1000
             val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
             val safeName = cameraName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val fileName = "FrCam_${safeName}_${sdf.format(Date(nowMs))}.gif"
+            val resolver = context.contentResolver
+
             val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "FrCam_${safeName}_${sdf.format(Date())}.gif")
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/gif")
+                put(MediaStore.Images.Media.DATE_ADDED, nowSec)
+                put(MediaStore.Images.Media.DATE_MODIFIED, nowSec)
+                put(MediaStore.Images.Media.DATE_TAKEN, nowMs)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/FrCam/Movimientos")
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
             }
-            val resolver = context.contentResolver
             val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
-            resolver.openOutputStream(uri)?.use { out -> gifFile.inputStream().use { it.copyTo(out) } }
+            resolver.openOutputStream(uri)?.use { out ->
+                gifFile.inputStream().use { input -> input.copyTo(out) }
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 values.clear()
                 values.put(MediaStore.Images.Media.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
             }
+
+            // Notificar a Samsung Gallery y Google Photos para indexación inmediata
+            try {
+                val projection = arrayOf(MediaStore.Images.Media.DATA)
+                val cursor = resolver.query(uri, projection, null, null, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val path = it.getString(0)
+                        if (!path.isNullOrBlank()) {
+                            android.media.MediaScannerConnection.scanFile(
+                                context,
+                                arrayOf(path),
+                                arrayOf("image/gif"),
+                                null
+                            )
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+
             uri
         } catch (_: Exception) {
             null
