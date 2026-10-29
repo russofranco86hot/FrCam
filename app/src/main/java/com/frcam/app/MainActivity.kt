@@ -140,6 +140,7 @@ class MainActivity : ComponentActivity() {
                 var showMotionHistoryDialog by remember { mutableStateOf(false) }
                 var showSettingsDialog by remember { mutableStateOf(false) }
                 var showGalleryDialog by remember { mutableStateOf(false) }
+                var initialStartInFullscreen by remember { mutableStateOf(false) }
 
                 val activeDetailCamera = cameras.find { it.id == selectedCameraId }
 
@@ -163,6 +164,7 @@ class MainActivity : ComponentActivity() {
                     SingleCameraDetailScreen(
                         camera = activeDetailCamera,
                         isInPipMode = isInPipModeState.value,
+                        startInFullscreen = initialStartInFullscreen,
                         ptzFeedback = ptzFeedback,
                         deviceInfo = deviceInfo,
                         accessLogs = accessLogs,
@@ -283,6 +285,11 @@ class MainActivity : ComponentActivity() {
                             showAddEditSheet = true
                         },
                         onSelectCamera = { cam ->
+                            initialStartInFullscreen = false
+                            viewModel.selectCamera(cam.id)
+                        },
+                        onOpenFullscreen = { cam ->
+                            initialStartInFullscreen = true
                             viewModel.selectCamera(cam.id)
                         },
                         onEditCamera = { cam ->
@@ -359,6 +366,26 @@ class MainActivity : ComponentActivity() {
                             viewModel.addWaitingCameraDirect(ap) { newCam ->
                                 showScannerDialog = false
                             }
+                        },
+                        onOpenManualAdd = { brand ->
+                            showScannerDialog = false
+                            viewModel.clearDiagnostic()
+                            val subnetPrefix = viewModel.localPhoneIp?.substringBeforeLast(".") ?: "192.168.1"
+                            editingCamera = CameraConfig(
+                                name = "Cámara ${brand.displayName}",
+                                brand = brand,
+                                connectionMode = brand.defaultConnectionMode,
+                                host = if (brand == CameraBrand.V380_PRO) "" else "$subnetPrefix.",
+                                rtspPort = brand.defaultRtspPort,
+                                httpPort = brand.defaultHttpPort,
+                                onvifPort = brand.defaultOnvifPort,
+                                username = brand.defaultUsername,
+                                mainStreamPath = brand.defaultMainPath,
+                                subStreamPath = brand.defaultSubPath,
+                                protocol = brand.defaultProtocol,
+                                ptzType = brand.defaultPtzType
+                            )
+                            showAddEditSheet = true
                         },
                         onDismiss = {
                             showScannerDialog = false

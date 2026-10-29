@@ -12,6 +12,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
@@ -60,6 +61,13 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import com.frcam.app.protocol.CameraProvisioningEngine
 import com.frcam.app.protocol.WaitingCameraAp
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.collectAsState
+import com.frcam.app.protocol.CameraAcousticPairingEngine
+import com.frcam.app.protocol.QrWifiFormat
 import androidx.compose.material.icons.filled.SdCard
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -81,6 +89,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -939,19 +948,49 @@ fun LanDiscoveryDialog(
     onScanWaitingCameras: () -> Unit = {},
     onProvisionWaitingCamera: (WaitingCameraAp, String, String) -> Unit = { _, _, _ -> },
     onAddWaitingCameraDirect: (WaitingCameraAp) -> Unit = {},
+    onOpenManualAdd: ((CameraBrand) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var selectedTab by remember { mutableIntStateOf(0) }
+    var pairingMethod by remember { mutableIntStateOf(0) }
+    var selectedQrFormat by remember { mutableStateOf(QrWifiFormat.UNIVERSAL_WIFI) }
 
     // Estados para el aprovisionamiento de cámara nueva a Wi-Fi de casa
     var targetApToProvision by remember { mutableStateOf<WaitingCameraAp?>(null) }
     var homeWifiSsid by remember { mutableStateOf("") }
     var homeWifiPassword by remember { mutableStateOf("") }
+    var showHomeWifiPassword by remember { mutableStateOf(false) }
 
-    // Al abrir la pestaña de cámaras nuevas, escanear automáticamente
-    LaunchedEffect(selectedTab) {
-        if (selectedTab == 1 && waitingCameraAps.isEmpty() && !isScanningWaiting) {
+    val isEmittingSound by CameraAcousticPairingEngine.isEmitting.collectAsState()
+    val soundSecondsRemaining by CameraAcousticPairingEngine.secondsRemaining.collectAsState()
+
+    DisposableEffect(Unit) {
+        onDispose {
+            CameraAcousticPairingEngine.stop()
+        }
+    }
+
+    // Auto-detectar SSID de la red Wi-Fi actual del móvil
+    LaunchedEffect(Unit) {
+        val (curSsid, _) = CameraProvisioningEngine.getCurrentWifiConnection(context)
+        if (!curSsid.isNullOrBlank() && homeWifiSsid.isBlank()) {
+            homeWifiSsid = curSsid
+        }
+    }
+
+    val qrBitmap = remember(homeWifiSsid, homeWifiPassword, selectedQrFormat) {
+        if (homeWifiSsid.isNotBlank()) {
+            CameraProvisioningEngine.generateWifiQrBitmap(homeWifiSsid, homeWifiPassword, selectedQrFormat, size = 512)
+        } else {
+            null
+        }
+    }
+
+    // Al abrir la pestaña de cámaras nuevas en modo AP, escanear automáticamente
+    LaunchedEffect(selectedTab, pairingMethod) {
+        if (selectedTab == 1 && pairingMethod == 2 && waitingCameraAps.isEmpty() && !isScanningWaiting) {
             onScanWaitingCameras()
         }
     }
@@ -1135,52 +1174,54 @@ fun LanDiscoveryDialog(
                     }
                 }
 
-                // ================= PESTAÑA 1: CÁMARAS NUEVAS / RESETEADAS (MODO AP) =================
+                // ================= PESTAÑA 1: VINCULAR CÁMARA (MULTIMODAL) =================
                 if (selectedTab == 1) {
-                    if (isScanningWaiting) {
-                        LinearProgressIndicator(
+                    // Selector de Alternativas de Vinculación
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        androidx.compose.material3.LocalMinimumInteractiveComponentSize provides androidx.compose.ui.unit.Dp.Unspecified
+                    ) {
+                        FlowRow(
                             modifier = Modifier.fillMaxWidth(),
-                            color = Color(0xFF10B981)
-                        )
-                        Text(
-                            text = "Buscando puntos de acceso de cámaras cercanas (MV*, VSTC*, IPCAM*)...",
-                            fontSize = 11.sp,
-                            color = Color(0xFF38BDF8)
-                        )
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            FilterChip(
+                                selected = pairingMethod == 0,
+                                onClick = { pairingMethod = 0 },
+                                label = { Text("1. Mostrar QR (Fácil)", fontSize = 11.sp, fontWeight = if (pairingMethod == 0) FontWeight.Bold else FontWeight.Normal) }
+                            )
+                            FilterChip(
+                                selected = pairingMethod == 1,
+                                onClick = { pairingMethod = 1 },
+                                label = { Text("2. Onda Sonora (Pitido)", fontSize = 11.sp, fontWeight = if (pairingMethod == 1) FontWeight.Bold else FontWeight.Normal) }
+                            )
+                            FilterChip(
+                                selected = pairingMethod == 2,
+                                onClick = { pairingMethod = 2 },
+                                label = { Text("3. Wi-Fi AP Cámara", fontSize = 11.sp, fontWeight = if (pairingMethod == 2) FontWeight.Bold else FontWeight.Normal) }
+                            )
+                            FilterChip(
+                                selected = pairingMethod == 3,
+                                onClick = { pairingMethod = 3 },
+                                label = { Text("4. Manual", fontSize = 11.sp, fontWeight = if (pairingMethod == 3) FontWeight.Bold else FontWeight.Normal) }
+                            )
+                        }
                     }
 
-                    if (!provisioningStatus.isNullOrBlank()) {
-                        Text(
-                            text = provisioningStatus,
-                            fontSize = 11.sp,
-                            color = if (provisioningStatus.contains("Error", ignoreCase = true)) Color(0xFFEF4444) else Color(0xFF34D399)
-                        )
-                    }
-
-                    // Caso A: Formulario abierto para vincular una cámara a la red Wi-Fi de casa
-                    if (targetApToProvision != null) {
-                        val ap = targetApToProvision!!
+                    // Datos Wi-Fi de Casa para los Métodos 1, 2 y 3
+                    if (pairingMethod in 0..2) {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text(
-                                    text = "Vincular ${ap.detectedBrand.displayName} a tu Wi-Fi",
+                                    text = "Datos de tu red Wi-Fi de Casa (2.4 GHz):",
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
+                                    fontSize = 12.sp,
                                     color = Color(0xFF38BDF8)
                                 )
-                                Text(
-                                    text = "Ingresa el nombre y clave de tu Wi-Fi de casa (2.4 GHz). La cámara se conectará a tu router.",
-                                    fontSize = 11.sp,
-                                    color = Color(0xFFCBD5E1)
-                                )
-
                                 OutlinedTextField(
                                     value = homeWifiSsid,
                                     onValueChange = { homeWifiSsid = it },
@@ -1188,202 +1229,308 @@ fun LanDiscoveryDialog(
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )
-
                                 OutlinedTextField(
                                     value = homeWifiPassword,
                                     onValueChange = { homeWifiPassword = it },
                                     label = { Text("Contraseña Wi-Fi de casa") },
                                     singleLine = true,
-                                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                    visualTransformation = if (showHomeWifiPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                                    trailingIcon = {
+                                        TextButton(onClick = { showHomeWifiPassword = !showHomeWifiPassword }) {
+                                            Text(if (showHomeWifiPassword) "Ocultar" else "Ver", fontSize = 11.sp)
+                                        }
+                                    },
                                     modifier = Modifier.fillMaxWidth()
                                 )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    OutlinedButton(
-                                        onClick = { targetApToProvision = null },
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Text("Cancelar", fontSize = 11.sp)
-                                    }
-                                    Button(
-                                        onClick = {
-                                            onProvisionWaitingCamera(ap, homeWifiSsid, homeWifiPassword)
-                                        },
-                                        enabled = homeWifiSsid.isNotBlank() && !isProvisioning,
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Text(if (isProvisioning) "Enviando..." else "Vincular", fontSize = 11.sp)
-                                    }
-                                }
                             }
                         }
-                    } else {
-                        // Lista de Cámaras Detectadas en Modo AP
-                        val connectedCam = waitingCameraAps.find { it.isCurrentlyConnected }
+                    }
 
-                        if (connectedCam != null) {
-                            // Banner de cámara conectada directamente
+                    // ---------- MÉTODO 0: MOSTRAR CÓDIGO QR AL LENTE (PREVALECE / POR DEFECTO) ----------
+                    if (pairingMethod == 0) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // Selector de Formato QR
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Formato:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                QrWifiFormat.entries.forEach { fmt ->
+                                    FilterChip(
+                                        selected = selectedQrFormat == fmt,
+                                        onClick = { selectedQrFormat = fmt },
+                                        label = {
+                                            Text(
+                                                text = when (fmt) {
+                                                    QrWifiFormat.UNIVERSAL_WIFI -> "Universal"
+                                                    QrWifiFormat.JSON_CAMERA -> "V720/JSON"
+                                                    QrWifiFormat.EYE4_VSTARCAM -> "Eye4"
+                                                    QrWifiFormat.PLAIN_TAB -> "Texto"
+                                                },
+                                                fontSize = 9.sp
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+
+                            if (qrBitmap != null) {
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.size(200.dp)
+                                ) {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Image(
+                                            bitmap = qrBitmap.asImageBitmap(),
+                                            contentDescription = "Código QR para Cámara",
+                                            modifier = Modifier.size(185.dp)
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text("Ingresa el SSID de tu Wi-Fi para ver el código QR", fontSize = 11.sp, color = Color(0xFFEF4444))
+                            }
+
                             Card(
-                                colors = CardDefaults.cardColors(containerColor = Color(0xFF064E3B)),
-                                shape = RoundedCornerShape(12.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(8.dp)) {
+                                    Text(
+                                        text = "1. Muestra este código QR directamente al lente de la cámara a 15-20 cm.\n2. La cámara emitirá un pitido o aviso: 'QR code scanned'.\n3. Presiona el botón abajo para encontrarla en la red.",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    selectedTab = 0
+                                    onStartScan()
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669))
+                            ) {
+                                Icon(Icons.Default.Lan, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Buscar Cámara en Red tras Escaneo QR", fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    // ---------- MÉTODO 1: EMITIR ONDA SONORA / PITIDO (SONIC PAIRING) ----------
+                    if (pairingMethod == 1) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = if (isEmittingSound) Color(0xFF78350F) else FrColors.cardHigh),
+                                shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = Icons.Default.WifiTethering,
-                                            contentDescription = null,
-                                            tint = Color(0xFF34D399),
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "¡Conectado al Wi-Fi de la cámara!",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp,
-                                            color = Color(0xFF34D399)
-                                        )
-                                    }
-                                    Text(
-                                        text = "${connectedCam.detectedBrand.displayName} • Red: ${connectedCam.ssid} (ID: ${connectedCam.extractedDeviceId})",
-                                        fontSize = 12.sp,
-                                        color = Color.White
+                                    Icon(
+                                        imageVector = Icons.Default.GraphicEq,
+                                        contentDescription = null,
+                                        tint = if (isEmittingSound) Color(0xFFF59E0B) else Color(0xFF38BDF8),
+                                        modifier = Modifier.size(32.dp)
                                     )
+                                    Text(
+                                        text = if (isEmittingSound) "EMITIENDO PITIDOS SONOROS (${soundSecondsRemaining}s)" else "Emparejamiento por Onda Sonora (Pitidos)",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = if (isEmittingSound) Color(0xFFF59E0B) else Color.White
+                                    )
+                                    Text(
+                                        text = "Modula tus credenciales Wi-Fi en tonos acústicos. Sube el volumen multimedia al máximo y acerca el altavoz del celular al micrófono de la cámara (5-10 cm).",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFCBD5E1),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
 
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
+                            if (isEmittingSound) {
+                                Button(
+                                    onClick = { CameraAcousticPairingEngine.stop() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Detener Emisión de Sonido", fontSize = 11.sp)
+                                }
+                            } else {
+                                Button(
+                                    onClick = {
+                                        if (homeWifiSsid.isNotBlank()) {
+                                            CameraAcousticPairingEngine.startSonicPairing(
+                                                scope = coroutineScope,
+                                                ssid = homeWifiSsid,
+                                                pass = homeWifiPassword
+                                            ) {
+                                                Toast.makeText(context, "Transmisión sonora completada", Toast.LENGTH_SHORT).show()
+                                            }
+                                        } else {
+                                            Toast.makeText(context, "Ingresa el nombre de red Wi-Fi", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    enabled = homeWifiSsid.isNotBlank(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
+                                ) {
+                                    Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Emitir Pitidos Sonoros a la Cámara", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------- MÉTODO 2: MODO AP (PUNTO DE ACCESO DE LA CÁMARA) ----------
+                    if (pairingMethod == 2) {
+                        if (isScanningWaiting) {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = Color(0xFF10B981)
+                            )
+                            Text(
+                                text = "Buscando puntos de acceso Wi-Fi de cámaras (NAX*, V720*, VSTC*, MV*)...",
+                                fontSize = 11.sp,
+                                color = Color(0xFF38BDF8)
+                            )
+                        }
+
+                        if (!provisioningStatus.isNullOrBlank()) {
+                            Text(
+                                text = provisioningStatus,
+                                fontSize = 11.sp,
+                                color = if (provisioningStatus.contains("Error", ignoreCase = true)) Color(0xFFEF4444) else Color(0xFF34D399)
+                            )
+                        }
+
+                        val connectedCam = waitingCameraAps.find { it.isCurrentlyConnected }
+                        if (connectedCam != null) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF064E3B)),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.WifiTethering, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("¡Conectado al Wi-Fi de la cámara!", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF34D399))
+                                    }
+                                    Text("${connectedCam.detectedBrand.displayName} • Red: ${connectedCam.ssid}", fontSize = 11.sp, color = Color.White)
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Button(
-                                            onClick = {
-                                                targetApToProvision = connectedCam
-                                            },
+                                            onClick = { onProvisionWaitingCamera(connectedCam, homeWifiSsid, homeWifiPassword) },
                                             modifier = Modifier.weight(1f),
+                                            enabled = homeWifiSsid.isNotBlank() && !isProvisioning,
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669))
                                         ) {
-                                            Text("Vincular a Wi-Fi Casa", fontSize = 11.sp)
+                                            Text(if (isProvisioning) "Enviando..." else "Vincular a Router", fontSize = 11.sp)
                                         }
                                         OutlinedButton(
-                                            onClick = {
-                                                onAddWaitingCameraDirect(connectedCam)
-                                            },
+                                            onClick = { onAddWaitingCameraDirect(connectedCam) },
                                             modifier = Modifier.weight(1f)
                                         ) {
-                                            Text("Modo Directo AP", fontSize = 11.sp)
+                                            Text("Modo Directo", fontSize = 11.sp)
                                         }
                                     }
                                 }
                             }
                         }
 
-                        // Lista de redes AP de cámaras encontradas cerca
                         val otherAps = waitingCameraAps.filter { !it.isCurrentlyConnected }
                         if (otherAps.isNotEmpty()) {
-                            Text(
-                                text = "Cámaras nuevas o reseteadas esperando configuración:",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF38BDF8)
-                            )
-
-                            LazyColumn(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(180.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
+                            Text("Puntos de acceso de cámaras encontrados:", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF38BDF8))
+                            LazyColumn(modifier = Modifier.fillMaxWidth().height(140.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(otherAps, key = { it.ssid }) { ap ->
-                                    Card(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
-                                        shape = RoundedCornerShape(10.dp)
-                                    ) {
-                                        Column(modifier = Modifier.padding(10.dp)) {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.SpaceBetween
+                                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh), shape = RoundedCornerShape(8.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(ap.ssid, fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
+                                                Text("${ap.detectedBrand.displayName} • Señal: ${ap.signalPercent}%", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    CameraProvisioningEngine.openWifiSettings(context)
+                                                    Toast.makeText(context, "Conéctate al Wi-Fi '${ap.ssid}' y regresa aquí para vincularla", Toast.LENGTH_LONG).show()
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                                             ) {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.weight(1f)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Wifi,
-                                                        contentDescription = null,
-                                                        tint = Color(0xFF34D399),
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Column {
-                                                        Text(
-                                                            text = ap.ssid,
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = 13.sp,
-                                                            color = Color.White
-                                                        )
-                                                        Text(
-                                                            text = "${ap.detectedBrand.displayName} • Señal: ${ap.signalPercent}%",
-                                                            fontSize = 11.sp,
-                                                            color = Color(0xFF94A3B8)
-                                                        )
-                                                    }
-                                                }
-                                                OutlinedButton(
-                                                    onClick = {
-                                                        CameraProvisioningEngine.openWifiSettings(context)
-                                                        Toast.makeText(
-                                                            context,
-                                                            "Conéctate al Wi-Fi '${ap.ssid}' y regresa aquí para vincularla",
-                                                            Toast.LENGTH_LONG
-                                                        ).show()
-                                                    },
-                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                                ) {
-                                                    Text("Conectar", fontSize = 11.sp)
-                                                }
+                                                Text("Conectar", fontSize = 10.sp)
                                             }
                                         }
                                     }
                                 }
                             }
                         } else if (connectedCam == null && !isScanningWaiting) {
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
-                                shape = RoundedCornerShape(10.dp),
+                            OutlinedButton(
+                                onClick = { CameraProvisioningEngine.openWifiSettings(context) },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = "¿Cómo agregar una cámara recién reseteada o nueva?",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp,
-                                        color = Color(0xFF38BDF8)
-                                    )
-                                    Text(
-                                        text = "1. Mantén presionado el botón RESET de la cámara 5-10 segundos hasta que anuncie 'Access Point ready' o 'Esperando conexión'.\n2. La cámara emitirá un Wi-Fi directo (ej. 'MV65077425').\n3. Conéctate a ese Wi-Fi en Ajustes o presiona 'Buscar Cámaras Nuevas'.",
-                                        fontSize = 11.sp,
-                                        color = Color(0xFFCBD5E1)
-                                    )
+                                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Abrir Ajustes Wi-Fi de Android", fontSize = 11.sp)
+                            }
+                        }
+                    }
 
-                                    OutlinedButton(
-                                        onClick = {
-                                            CameraProvisioningEngine.openWifiSettings(context)
-                                        },
-                                        modifier = Modifier.fillMaxWidth()
+                    // ---------- MÉTODO 3: INGRESO MANUAL CON PLANTILLAS ----------
+                    if (pairingMethod == 3) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "Toca para agregar directamente con IP o Cloud ID, usuario y clave:",
+                                fontSize = 11.sp,
+                                color = Color(0xFFCBD5E1)
+                            )
+                            val manualBrands = listOf(
+                                CameraBrand.EYE4_VSTARCAM to "Eye4 / VStarcam (RTSP 10554, Web 81, ONVIF 10080)",
+                                CameraBrand.V720_NAXCLOW to "V720 Naxclow (UDP 6123, RTSP 554, Web 80/8080)",
+                                CameraBrand.V380_PRO to "V380 PRO (Cloud Relay ID o Puerto 8800)",
+                                CameraBrand.ONVIF_GENERIC to "ONVIF Estándar (Puerto 80/8899)",
+                                CameraBrand.CUSTOM_RTSP to "RTSP Personalizado (Puerto 554)"
+                            )
+                            manualBrands.forEach { (brand, desc) ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onOpenManualAdd?.invoke(brand) },
+                                    colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Abrir Ajustes Wi-Fi de Android", fontSize = 11.sp)
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(brand.displayName, fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
+                                            Text(desc, fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                        }
+                                        Icon(Icons.Default.AddCircleOutline, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
                                     }
                                 }
                             }
@@ -1400,12 +1547,12 @@ fun LanDiscoveryDialog(
                 ) {
                     Text(if (isScanning) "Escaneando..." else "Escanear Red")
                 }
-            } else {
+            } else if (pairingMethod == 2) {
                 Button(
                     onClick = onScanWaitingCameras,
                     enabled = !isScanningWaiting
                 ) {
-                    Text(if (isScanningWaiting) "Buscando..." else "Buscar Cámaras Nuevas")
+                    Text(if (isScanningWaiting) "Buscando..." else "Buscar Wi-Fi de Cámaras")
                 }
             }
         },

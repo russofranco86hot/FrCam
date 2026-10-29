@@ -28,6 +28,35 @@ import java.net.URLEncoder
 import java.util.UUID
 import kotlin.math.min
 
+import android.graphics.Bitmap
+import android.graphics.Color
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
+import java.util.EnumMap
+
+/**
+ * Formatos de código QR para vincular cámaras por lectura de pantalla con su lente.
+ */
+enum class QrWifiFormat(val label: String, val description: String) {
+    UNIVERSAL_WIFI(
+        label = "Wi-Fi Universal (Recomendado)",
+        description = "Formato estándar compatible con Eye4, Tapo, Hikvision, V380 y el 95% de cámaras."
+    ),
+    JSON_CAMERA(
+        label = "JSON V720 / Naxclow / A9",
+        description = "Formato JSON utilizado por cámaras V720, Naxclow y cámaras miniatura A9."
+    ),
+    EYE4_VSTARCAM(
+        label = "Eye4 / VStarcam Nativo",
+        description = "Formato bssid/ssid/pwd específico para lectores de cámaras Eye4."
+    ),
+    PLAIN_TAB(
+        label = "Texto Plano Tabulado",
+        description = "Formato simple con salto de línea o tabulación para cámaras genéricas."
+    )
+}
+
 /**
  * Representa una cámara recién reseteada o nueva que está emitiendo su propio
  * Punto de Acceso Wi-Fi (Modo AP) esperando ser configurada.
@@ -65,7 +94,11 @@ object CameraProvisioningEngine {
         val clean = ssid.trim().removeSurrounding("\"").uppercase()
         return when {
             clean.startsWith("MV") -> true to CameraBrand.V380_PRO
-            clean.startsWith("VSTC") || clean.startsWith("IPCAM-") || clean.startsWith("EYE4-") -> true to CameraBrand.EYE4_VSTARCAM
+            clean.startsWith("NAX_") || clean.startsWith("V720_") || clean.startsWith("JA_") ||
+                clean.startsWith("FT_") || clean.startsWith("BAT_") || clean.startsWith("A9_") ||
+                clean.startsWith("MINI_") || clean.contains("V720") -> true to CameraBrand.V720_NAXCLOW
+            clean.startsWith("VSTC") || clean.startsWith("IPCAM-") || clean.startsWith("EYE4-") ||
+                clean.startsWith("VSTAR") -> true to CameraBrand.EYE4_VSTARCAM
             clean.startsWith("CARE-AP") || clean.startsWith("GW_AP") || clean.startsWith("CLOUDCAM") -> true to CameraBrand.ONVIF_GENERIC
             clean.startsWith("SMARTLIFE-") || clean.startsWith("TUYASMART-") || clean.startsWith("TUYA-") -> true to CameraBrand.ONVIF_GENERIC
             clean.startsWith("IPC-") || clean.startsWith("CAM-") || clean.startsWith("HD-") || clean.startsWith("WIFI-CAM") || clean.startsWith("ROBOT-") -> true to CameraBrand.ONVIF_GENERIC
@@ -208,6 +241,41 @@ object CameraProvisioningEngine {
     }
 
     /**
+     * Genera un Bitmap con el código QR optimizado para que el lente de la cámara lo escanee.
+     */
+    fun generateWifiQrBitmap(
+        ssid: String,
+        pass: String,
+        format: QrWifiFormat = QrWifiFormat.UNIVERSAL_WIFI,
+        size: Int = 600
+    ): Bitmap? {
+        if (ssid.isBlank()) return null
+        return try {
+            val payload = when (format) {
+                QrWifiFormat.UNIVERSAL_WIFI -> "WIFI:S:${ssid.trim()};T:WPA;P:${pass};;"
+                QrWifiFormat.JSON_CAMERA -> """{"s":"${ssid.trim()}","p":"${pass}","t":"WPA2"}"""
+                QrWifiFormat.EYE4_VSTARCAM -> "bssid:,ssid:${ssid.trim()},pwd:${pass}"
+                QrWifiFormat.PLAIN_TAB -> "${ssid.trim()}\t${pass}"
+            }
+            val hints = EnumMap<EncodeHintType, Any>(EncodeHintType::class.java).apply {
+                put(EncodeHintType.MARGIN, 2)
+                put(EncodeHintType.CHARACTER_SET, "UTF-8")
+            }
+            val bitMatrix = QRCodeWriter().encode(payload, BarcodeFormat.QR_CODE, size, size, hints)
+            val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
+            for (x in 0 until size) {
+                for (y in 0 until size) {
+                    bmp.setPixel(x, y, if (bitMatrix.get(x, y)) Color.BLACK else Color.WHITE)
+                }
+            }
+            bmp
+        } catch (e: Exception) {
+            Log.w(TAG, "Error generando QR para cámara: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * Envía las credenciales de la red Wi-Fi de la casa a la cámara conectada en Modo AP.
      * La cámara recibirá el SSID y contraseña, guardará la configuración, se reiniciará y
      * se conectará al router de casa (emitiendo aviso de voz "Wi-Fi connecting... Wi-Fi connected").
@@ -281,12 +349,65 @@ object CameraProvisioningEngine {
                 }
             }
 
+            CameraBrand.V720_NAXCLOW -> {
+                // Enviar tanto por HTTP como por UDP a la cámara V720 en modo AP
+                var sentSuccess = false
+                val v720Urls = listOf(
+                    "http://$targetIp/set_wifi?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}",
+                    "http://$targetIp/cgi-bin/wifi.cgi?action=set&ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&key=${URLEncoder.encode(homePass, "UTF-8")}",
+                    "http://$targetIp/wifi_cfg?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}",
+                    "http://$targetIp:8080/set_wifi?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}"
+                )
+                for (urlStr in v720Urls) {
+                    try {
+                        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 2500
+                            readTimeout = 2500
+                            requestMethod = "GET"
+                        }
+                        if (conn.responseCode in 200..299) {
+                            conn.disconnect()
+                            sentSuccess = true
+                            break
+                        }
+                        conn.disconnect()
+                    } catch (e: Exception) {
+                        lastError = e.message
+                    }
+                }
+
+                // Enviar también por Broadcast UDP en puertos V720 (6123 y 16123)
+                try {
+                    DatagramSocket().use { udpSocket ->
+                        udpSocket.broadcast = true
+                        val udpPayload = "SETWIFI^${homeSsid.trim()}^${homePass}^2\n".toByteArray(Charsets.UTF_8)
+                        val targets = listOf(
+                            InetAddress.getByName(targetIp),
+                            InetAddress.getByName("255.255.255.255")
+                        )
+                        for (dest in targets) {
+                            udpSocket.send(DatagramPacket(udpPayload, udpPayload.size, dest, 6123))
+                            udpSocket.send(DatagramPacket(udpPayload, udpPayload.size, dest, 16123))
+                        }
+                        sentSuccess = true
+                    }
+                } catch (_: Exception) {}
+
+                if (sentSuccess) {
+                    return@withContext Result.success(
+                        "¡Configuración enviada a la cámara V720! Se vinculará a '$homeSsid'."
+                    )
+                }
+            }
+
             else -> {
                 // Cámaras estándar / Eye4 / ONVIF / Xiongmai en Modo AP
                 val cgiUrls = listOf(
                     "http://$targetIp/set_wifi.cgi?next_url=wifi.htm&ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&wpapsk=${URLEncoder.encode(homePass, "UTF-8")}",
                     "http://$targetIp/cgi-bin/wifi.cgi?action=set&ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&key=${URLEncoder.encode(homePass, "UTF-8")}",
-                    "http://$targetIp/web/cgi-bin/hi3510/setwifiattr.cgi?-enable=1&-ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&-key=${URLEncoder.encode(homePass, "UTF-8")}"
+                    "http://$targetIp/web/cgi-bin/hi3510/setwifiattr.cgi?-enable=1&-ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&-key=${URLEncoder.encode(homePass, "UTF-8")}",
+                    "http://$targetIp/set_wifi?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}",
+                    "http://$targetIp:81/set_wifi.cgi?next_url=wifi.htm&ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&wpapsk=${URLEncoder.encode(homePass, "UTF-8")}"
                 )
 
                 for (urlStr in cgiUrls) {
@@ -360,10 +481,12 @@ object CameraProvisioningEngine {
             brand = brand,
             deviceId = devId,
             host = if (cameraAp.isCurrentlyConnected) cameraAp.defaultGatewayIp else "",
-            rtspPort = if (brand == CameraBrand.V380_PRO) 8800 else 554,
-            httpPort = if (brand == CameraBrand.V380_PRO) 8800 else 80,
-            protocol = if (brand == CameraBrand.V380_PRO) StreamProtocol.V380_NATIVE else StreamProtocol.RTSP,
-            connectionMode = if (devId.isNotBlank()) ConnectionMode.HYBRID_AUTO else ConnectionMode.LAN_IP,
+            rtspPort = brand.defaultRtspPort,
+            httpPort = brand.defaultHttpPort,
+            onvifPort = brand.defaultOnvifPort,
+            protocol = brand.defaultProtocol,
+            ptzType = brand.defaultPtzType,
+            connectionMode = if (devId.isNotBlank() && brand == CameraBrand.V380_PRO) ConnectionMode.HYBRID_AUTO else ConnectionMode.LAN_IP,
             username = brand.defaultUsername,
             password = "",
             mainStreamPath = brand.defaultMainPath,

@@ -132,6 +132,7 @@ dependencies {
     implementation("com.google.mlkit:object-detection:17.0.2")
     implementation("com.google.android.gms:play-services-wearable:19.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")
+    implementation("com.google.zxing:core:3.5.3")
 
     coreLibraryDesugaring(libs.desugaring)
     testImplementation(libs.junit)

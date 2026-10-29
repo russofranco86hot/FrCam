@@ -110,6 +110,7 @@ fun CameraDashboardScreen(
     onOpenMotionHistory: () -> Unit,
     onAddCamera: (CameraBrand?) -> Unit,
     onSelectCamera: (CameraConfig) -> Unit,
+    onOpenFullscreen: (CameraConfig) -> Unit = onSelectCamera,
     onEditCamera: (CameraConfig) -> Unit,
     onDeleteCamera: (CameraConfig) -> Unit,
     onToggleLiveDashboard: (CameraConfig, Boolean) -> Unit,
@@ -259,8 +260,7 @@ fun CameraDashboardScreen(
             TopAppBar(
                 title = {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
                             imageVector = Icons.Default.Security,
@@ -269,12 +269,13 @@ fun CameraDashboardScreen(
                             modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f, fill = false)) {
+                        Column {
                             Text(
                                 text = "FrCam Monitor Pro",
-                                fontSize = 17.sp,
+                                fontSize = 16.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
@@ -282,6 +283,7 @@ fun CameraDashboardScreen(
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -427,6 +429,7 @@ fun CameraDashboardScreen(
                         onToggleLiveDashboard = { active -> onToggleLiveDashboard(camera, active) },
                         onToggleMotion = { enabled -> onToggleMotion(camera, enabled) },
                         onOpenDetail = { onSelectCamera(camera) },
+                        onOpenFullscreen = { onOpenFullscreen(camera) },
                         onEdit = { onEditCamera(camera) },
                         onDelete = { cameraToDelete = camera }
                     )
@@ -443,6 +446,7 @@ private fun CameraGridTile(
     onToggleLiveDashboard: (Boolean) -> Unit,
     onToggleMotion: (Boolean) -> Unit,
     onOpenDetail: () -> Unit,
+    onOpenFullscreen: () -> Unit = onOpenDetail,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -651,12 +655,12 @@ private fun CameraGridTile(
                         )
                     }
                     IconButton(
-                        onClick = onOpenDetail,
+                        onClick = onOpenFullscreen,
                         modifier = Modifier.size(30.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Fullscreen,
-                            contentDescription = "Abrir consola PTZ y pantalla completa",
+                            contentDescription = "Ver en Pantalla Completa",
                             tint = Color(0xFF38BDF8),
                             modifier = Modifier.size(18.dp)
                         )

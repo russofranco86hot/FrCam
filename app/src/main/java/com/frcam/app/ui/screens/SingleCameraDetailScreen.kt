@@ -8,7 +8,9 @@ import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -122,6 +124,7 @@ import kotlinx.coroutines.launch
 fun SingleCameraDetailScreen(
     camera: CameraConfig,
     isInPipMode: Boolean = false,
+    startInFullscreen: Boolean = false,
     ptzFeedback: String?,
     deviceInfo: CameraDeviceInfo?,
     accessLogs: List<CameraAccessRecord>,
@@ -196,10 +199,15 @@ fun SingleCameraDetailScreen(
     }
 
     var showOnScreenCruceta by remember(camera.id) { mutableStateOf(false) }
+    var isFullscreen by remember(camera.id, startInFullscreen) { mutableStateOf(startInFullscreen) }
+
+    BackHandler(enabled = isFullscreen) {
+        isFullscreen = false
+    }
 
     Scaffold(
         topBar = {
-            if (!isInPipMode) {
+            if (!isInPipMode && !isFullscreen) {
                 TopAppBar(
                     title = {
                         Column {
@@ -223,6 +231,13 @@ fun SingleCameraDetailScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = { isFullscreen = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Fullscreen,
+                                contentDescription = "Ver en Pantalla Completa",
+                                tint = Color(0xFF38BDF8)
+                            )
+                        }
                         IconButton(onClick = { showGalleryDialog = true }) {
                             Icon(
                                 imageVector = Icons.Default.PhotoLibrary,
@@ -271,7 +286,7 @@ fun SingleCameraDetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .then(
-                    if (!isInPipMode) {
+                    if (!isInPipMode && !isFullscreen) {
                         Modifier
                             .padding(paddingValues)
                             .verticalScroll(rememberScrollState())
@@ -280,9 +295,9 @@ fun SingleCameraDetailScreen(
                     }
                 )
         ) {
-            // Live Video Player Surface (Full screen in PiP mode, 16:9 when regular)
+            // Live Video Player Surface (Full screen in PiP or Fullscreen mode, 16:9 when regular)
             Box(
-                modifier = if (isInPipMode) {
+                modifier = if (isInPipMode || isFullscreen) {
                     Modifier
                         .fillMaxSize()
                         .background(Color.Black)
@@ -408,6 +423,22 @@ fun SingleCameraDetailScreen(
                                 )
                             }
                         }
+                        // Botón de Pantalla Completa
+                        FilledIconButton(
+                            onClick = { isFullscreen = !isFullscreen },
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = if (isFullscreen) Color(0xFF0284C7) else Color(0xFF334155),
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Fullscreen,
+                                contentDescription = if (isFullscreen) "Salir de Pantalla Completa" else "Pantalla Completa",
+                                tint = if (isFullscreen) Color.White else Color(0xFF38BDF8),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
 
                     // Floating On-Screen D-Pad (Cruceta interactiva sobre el video)
@@ -502,10 +533,119 @@ fun SingleCameraDetailScreen(
                             )
                         }
                     }
+
+                    // En modo pantalla completa: barra superior flotante con botón salir y nombre
+                    if (isFullscreen) {
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(12.dp)
+                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            IconButton(
+                                onClick = { isFullscreen = false },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Salir de Pantalla Completa",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Text(
+                                text = camera.name,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                text = "• $detectedResolution",
+                                color = Color(0xFF38BDF8),
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        // Botones flotantes superiores de Foto y Grabación en Pantalla Completa
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp)
+                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilledIconButton(
+                                onClick = {
+                                    val bmp = frameCaptureHandle.captureCurrentBitmap()
+                                    if (bmp == null) {
+                                        Toast.makeText(context, "Esperando imagen en vivo...", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        coroutineScope.launch {
+                                            val res = CameraMediaEngine.saveSnapshotToGallery(context, camera.name, bmp)
+                                            val msg = res.fold(onSuccess = { it }, onFailure = { it.message ?: "Error" })
+                                            mediaFeedback = msg
+                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFF0284C7)),
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(Icons.Default.CameraAlt, contentDescription = "Foto", tint = Color.White, modifier = Modifier.size(18.dp))
+                            }
+
+                            FilledIconButton(
+                                onClick = {
+                                    if (!isRecordingVideo) {
+                                        val started = videoRecorder.startRecording(
+                                            scope = coroutineScope,
+                                            frameProvider = { frameCaptureHandle.captureCurrentBitmap(1280, 720) },
+                                            onElapsedSeconds = { sec -> recordingSeconds = sec }
+                                        )
+                                        if (started) {
+                                            isRecordingVideo = true
+                                            recordingSeconds = 0
+                                            mediaFeedback = "Grabando video en vivo (.mp4)..."
+                                        } else {
+                                            mediaFeedback = "Error al iniciar el grabador MP4"
+                                            Toast.makeText(context, mediaFeedback, Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        isRecordingVideo = false
+                                        mediaFeedback = "Procesando y guardando MP4 en Galería..."
+                                        coroutineScope.launch {
+                                            val res = videoRecorder.stopAndSaveToGallery()
+                                            val msg = res.fold(onSuccess = { it }, onFailure = { it.message ?: "Error al guardar MP4" })
+                                            mediaFeedback = msg
+                                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                },
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = if (isRecordingVideo) Color(0xFFDC2626) else Color(0xFF334155)
+                                ),
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isRecordingVideo) Icons.Default.StopCircle else Icons.Default.FiberManualRecord,
+                                    contentDescription = "Grabar",
+                                    tint = if (isRecordingVideo) Color.White else Color(0xFFEF4444),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
-            // Stream Quick Toolbar + Recording & Motion Actions
+            if (!isInPipMode && !isFullscreen) {
+                // Stream Quick Toolbar + Recording & Motion Actions
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1183,6 +1323,7 @@ fun SingleCameraDetailScreen(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+        }
         }
     }
 

@@ -105,6 +105,22 @@ object NetworkCameraScanner {
             onDeviceFound(dev)
         }
 
+        onProgress(0.12f, "Buscando cámaras Eye4 (VStarcam) y V720 por difusión...")
+        val eye4Devices = discoverEye4ViaUdpBroadcast()
+        for (eye4 in eye4Devices) {
+            if (!discovered.containsKey(eye4.ipAddress)) {
+                discovered[eye4.ipAddress] = eye4
+                onDeviceFound(eye4)
+            }
+        }
+        val v720Devices = discoverV720ViaUdpBroadcast()
+        for (v720 in v720Devices) {
+            if (!discovered.containsKey(v720.ipAddress)) {
+                discovered[v720.ipAddress] = v720
+                onDeviceFound(v720)
+            }
+        }
+
         onProgress(0.15f, "Enviando sonda UDP ONVIF WS-Discovery en $subnetPrefix.0/24...")
         val onvifMap = discoverOnvifViaUdpMulticast()
 
@@ -183,16 +199,110 @@ object NetworkCameraScanner {
         }
     }
 
+    fun discoverEye4ViaUdpBroadcast(): List<DiscoveredCameraDevice> {
+        val found = mutableListOf<DiscoveredCameraDevice>()
+        try {
+            DatagramSocket().use { socket ->
+                socket.broadcast = true
+                socket.soTimeout = 350
+                val broadcastAddr = InetAddress.getByName("255.255.255.255")
+                val searchBytes = "VSTC_SEARCH\n".toByteArray(Charsets.US_ASCII)
+                val p8600 = DatagramPacket(searchBytes, searchBytes.size, broadcastAddr, 8600)
+                val p32108 = DatagramPacket(searchBytes, searchBytes.size, broadcastAddr, 32108)
+                repeat(2) {
+                    socket.send(p8600)
+                    socket.send(p32108)
+                }
+                val buf = ByteArray(2048)
+                val deadline = System.currentTimeMillis() + 500L
+                while (System.currentTimeMillis() < deadline) {
+                    try {
+                        val recv = DatagramPacket(buf, buf.size)
+                        socket.receive(recv)
+                        val ip = recv.address?.hostAddress ?: continue
+                        val text = String(recv.data, 0, recv.length, Charsets.UTF_8)
+                        if (found.none { it.ipAddress == ip }) {
+                            val uid = text.substringAfter("uid=").substringBefore("&").substringBefore(";").trim().takeIf { it.isNotBlank() } ?: "VStarcam"
+                            found.add(
+                                DiscoveredCameraDevice(
+                                    ipAddress = ip,
+                                    detectedBrand = CameraBrand.EYE4_VSTARCAM,
+                                    deviceName = "Cámara Eye4 / VStarcam ($ip)",
+                                    openPorts = listOf(10554, 81),
+                                    rtspPort = 10554,
+                                    httpPort = 81,
+                                    onvifPort = 10080,
+                                    deviceId = uid,
+                                    suggestedMainPath = "/tcp/av0_0",
+                                    suggestedSubPath = "/tcp/av0_1",
+                                    macOrHardwareInfo = "Eye4 UDP Discovery • UID: $uid"
+                                )
+                            )
+                        }
+                    } catch (_: Exception) {
+                        break
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return found
+    }
+
+    fun discoverV720ViaUdpBroadcast(): List<DiscoveredCameraDevice> {
+        val found = mutableListOf<DiscoveredCameraDevice>()
+        try {
+            DatagramSocket().use { socket ->
+                socket.broadcast = true
+                socket.soTimeout = 350
+                val broadcastAddr = InetAddress.getByName("255.255.255.255")
+                val searchBytes = "NAX_DISCOVER\n".toByteArray(Charsets.US_ASCII)
+                val p6123 = DatagramPacket(searchBytes, searchBytes.size, broadcastAddr, 6123)
+                val p16123 = DatagramPacket(searchBytes, searchBytes.size, broadcastAddr, 16123)
+                repeat(2) {
+                    socket.send(p6123)
+                    socket.send(p16123)
+                }
+                val buf = ByteArray(2048)
+                val deadline = System.currentTimeMillis() + 500L
+                while (System.currentTimeMillis() < deadline) {
+                    try {
+                        val recv = DatagramPacket(buf, buf.size)
+                        socket.receive(recv)
+                        val ip = recv.address?.hostAddress ?: continue
+                        if (found.none { it.ipAddress == ip }) {
+                            found.add(
+                                DiscoveredCameraDevice(
+                                    ipAddress = ip,
+                                    detectedBrand = CameraBrand.V720_NAXCLOW,
+                                    deviceName = "Cámara V720 Naxclow ($ip)",
+                                    openPorts = listOf(6123),
+                                    rtspPort = 554,
+                                    httpPort = 80,
+                                    onvifPort = 6123,
+                                    suggestedMainPath = "/live/ch0",
+                                    suggestedSubPath = "/mjpeg/1",
+                                    macOrHardwareInfo = "V720 UDP Broadcast Detectado"
+                                )
+                            )
+                        }
+                    } catch (_: Exception) {
+                        break
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return found
+    }
+
     private fun probeCameraPorts(ip: String, timeoutMs: Int): List<Int> {
         val open = mutableListOf<Int>()
-        val primaryPorts = listOf(10554, 8800, 6123, 554, 8899, 10080, 8554, 2020, 8000, 81, 8080, 37777, 34567, 8081, 88, 7070)
+        val primaryPorts = listOf(
+            10554, 8800, 6123, 16123, 554, 8899, 10080, 8554, 2020, 8000, 81, 8080, 80, 6600, 6001, 8001, 9988, 37777, 34567, 8081, 88, 7070
+        )
         for (port in primaryPorts) {
             if (isTcpPortOpen(ip, port, timeoutMs)) {
                 open.add(port)
             }
-        }
-        if (open.isNotEmpty() && isTcpPortOpen(ip, 80, timeoutMs)) {
-            open.add(80)
         }
         return open
     }
@@ -223,10 +333,22 @@ object NetworkCameraScanner {
                     resp.contains("vstarcam") ||
                     resp.contains("eye4") ||
                     resp.contains("naxclow") ||
+                    resp.contains("v720") ||
                     resp.contains("hikvision") ||
                     resp.contains("dahua") ||
                     resp.contains("mjpeg") ||
-                    resp.contains("camera")
+                    resp.contains("camera") ||
+                    resp.contains("realm=") ||
+                    resp.contains("basic realm") ||
+                    resp.contains("digest realm") ||
+                    resp.contains("boa/") ||
+                    resp.contains("mini-httpd") ||
+                    resp.contains("hipcam") ||
+                    resp.contains("netwave") ||
+                    resp.contains("webcam") ||
+                    resp.contains("live") ||
+                    resp.contains("video") ||
+                    resp.contains("snapshot")
             }
         } catch (_: Exception) {
             false
@@ -278,19 +400,19 @@ object NetworkCameraScanner {
                 )
             }
 
-            openPorts.contains(6123) -> {
+            openPorts.contains(6123) || openPorts.contains(16123) || openPorts.contains(6600) || openPorts.contains(6001) -> {
                 DiscoveredCameraDevice(
                     ipAddress = ip,
                     detectedBrand = CameraBrand.V720_NAXCLOW,
                     deviceName = "Cámara V720 Naxclow ($ip)",
                     openPorts = openPorts,
                     rtspPort = 554,
-                    httpPort = 80,
-                    onvifPort = 6123,
+                    httpPort = if (openPorts.contains(8080)) 8080 else 80,
+                    onvifPort = if (openPorts.contains(6123)) 6123 else 16123,
                     onvifServiceUrl = onvifServiceUrl,
                     suggestedMainPath = "/live/ch0",
                     suggestedSubPath = "/mjpeg/1",
-                    macOrHardwareInfo = "V720 Naxclow Puerto 6123"
+                    macOrHardwareInfo = "V720 Naxclow (${openPorts.joinToString("/")})"
                 )
             }
 
