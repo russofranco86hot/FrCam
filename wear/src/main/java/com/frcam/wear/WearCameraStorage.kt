@@ -1,0 +1,67 @@
+package com.frcam.wear
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
+import com.frcam.app.model.CameraConfig
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+/**
+ * Almacenamiento local de cámaras en el reloj Wear OS.
+ * Mantiene en memoria y en SharedPreferences la lista de cámaras sincronizadas desde el celular.
+ */
+object WearCameraStorage {
+
+    private const val PREFS_NAME = "frcam_wear_prefs"
+    private const val KEY_CAMERAS_JSON = "cameras_json"
+    private const val TAG = "WearCameraStorage"
+
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
+
+    private val _cameras = MutableStateFlow<List<CameraConfig>>(emptyList())
+    val cameras: StateFlow<List<CameraConfig>> = _cameras.asStateFlow()
+
+    fun init(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_CAMERAS_JSON, null)
+        if (!raw.isNullOrBlank()) {
+            try {
+                val list = json.decodeFromString<List<CameraConfig>>(raw)
+                _cameras.value = list
+                Log.d(TAG, "Cámaras cargadas desde caché Wear OS: ${list.size}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error decodificando cámaras en reloj", e)
+            }
+        }
+    }
+
+    fun saveCameras(context: Context, cameraList: List<CameraConfig>) {
+        _cameras.value = cameraList
+        try {
+            val raw = json.encodeToString(cameraList)
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_CAMERAS_JSON, raw)
+                .apply()
+            Log.d(TAG, "Cámaras guardadas con éxito en reloj: ${cameraList.size}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error guardando cámaras en reloj", e)
+        }
+    }
+
+    fun saveJsonString(context: Context, camerasJson: String) {
+        try {
+            val list = json.decodeFromString<List<CameraConfig>>(camerasJson)
+            saveCameras(context, list)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parseando json recibido en reloj", e)
+        }
+    }
+}

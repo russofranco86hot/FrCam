@@ -19,3 +19,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "FrCam"
 include(":app")
+include(":wear")

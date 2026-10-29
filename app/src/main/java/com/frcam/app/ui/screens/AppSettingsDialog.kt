@@ -1,5 +1,6 @@
 package com.frcam.app.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -20,13 +21,17 @@ import androidx.compose.ui.unit.sp
 import com.frcam.app.BuildConfig
 import com.frcam.app.data.AppSettings
 import com.frcam.app.data.MotionSensitivity
+import com.frcam.app.model.CameraConfig
 import com.frcam.app.ui.theme.FrColors
+import com.frcam.app.wear.PhoneWearSyncEngine
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppSettingsDialog(
+    cameras: List<CameraConfig> = emptyList(),
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     var amoled by remember { mutableStateOf(AppSettings.amoled) }
     var motionSeconds by remember { mutableIntStateOf(AppSettings.motionClipSeconds) }
     var startMinutes by remember { mutableIntStateOf(AppSettings.scheduleStartMinutes) }
@@ -371,6 +376,67 @@ fun AppSettingsDialog(
                                     label = { Text("${min} min", fontSize = 10.sp) }
                                 )
                             }
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // SECCIÓN WEAR OS (RELOJ INTELIGENTE)
+                Text(
+                    text = "Wear OS (Reloj Inteligente)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = Color(0xFF38BDF8)
+                )
+
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = FrColors.card),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Watch,
+                                contentDescription = null,
+                                tint = Color(0xFF38BDF8),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "Sincronización con FrCam Wear OS",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "Transfiere tus ${cameras.size} cámaras configuradas a tu reloj inteligente Wear OS para verlas juntas o en pantalla completa.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                PhoneWearSyncEngine.syncCamerasToWatch(context, cameras)
+                                Toast.makeText(
+                                    context,
+                                    "Enviando ${cameras.size} cámaras al reloj...",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Sincronizar cámaras con reloj ahora", fontSize = 12.sp)
                         }
                     }
                 }

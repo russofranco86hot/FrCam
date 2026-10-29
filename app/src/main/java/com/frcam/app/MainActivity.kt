@@ -38,12 +38,28 @@ import com.frcam.app.ui.screens.RingCloudLoginDialog
 import com.frcam.app.ui.screens.SingleCameraDetailScreen
 import com.frcam.app.ui.theme.FrCamTheme
 import com.frcam.app.viewmodel.CameraViewModel
+import com.frcam.app.wear.PhoneWearSyncEngine
+import com.google.android.gms.wearable.MessageClient
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: CameraViewModel by viewModels()
     private var multicastLock: WifiManager.MulticastLock? = null
     private val isInPipModeState = mutableStateOf(false)
+    private var wearMessageListener: MessageClient.OnMessageReceivedListener? = null
+
+    override fun onStart() {
+        super.onStart()
+        wearMessageListener = PhoneWearSyncEngine.registerListener(this) {
+            viewModel.cameras.value
+        }
+    }
+
+    override fun onStop() {
+        wearMessageListener?.let { PhoneWearSyncEngine.unregisterListener(this, it) }
+        wearMessageListener = null
+        super.onStop()
+    }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
@@ -118,6 +134,13 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(activeDetailCamera?.id) {
                     if (activeDetailCamera != null) {
                         viewModel.recordCameraStreamAccess(activeDetailCamera)
+                    }
+                }
+
+                // Sincronizar automáticamente con el reloj Wear OS ante cambios en la lista de cámaras
+                LaunchedEffect(cameras) {
+                    if (cameras.isNotEmpty()) {
+                        PhoneWearSyncEngine.syncCamerasToWatch(this@MainActivity, cameras)
                     }
                 }
 
@@ -348,6 +371,7 @@ class MainActivity : ComponentActivity() {
 
                 if (showSettingsDialog) {
                     AppSettingsDialog(
+                        cameras = cameras,
                         onDismiss = { showSettingsDialog = false }
                     )
                 }

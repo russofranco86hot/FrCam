@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Camera dome / lens icon -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M54,28A26,26 0,1 0,54 80A26,26 0,1 0,54 28ZM54,70A16,16 0,1 1,54 38A16,16 0,1 1,54 70Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,46A8,8 0,1 0,54 62A8,8 0,1 0,54 46Z" />
+    <path
+        android:fillColor="#EF4444"
+        android:pathData="M74,34A4,4 0,1 0,74 42A4,4 0,1 0,74 34Z" />
+</vector>
