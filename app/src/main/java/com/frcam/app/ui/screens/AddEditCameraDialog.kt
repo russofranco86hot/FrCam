@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -59,6 +60,10 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
+import com.frcam.app.protocol.BluetoothCameraEngine
+import com.frcam.app.protocol.DiscoveredBleCamera
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.BluetoothSearching
 import com.frcam.app.protocol.CameraProvisioningEngine
 import com.frcam.app.protocol.WaitingCameraAp
 import androidx.compose.material.icons.filled.GraphicEq
@@ -411,14 +416,16 @@ fun AddEditCameraSheet(
                 OutlinedTextField(
                     value = username,
                     onValueChange = { username = it },
-                    label = { Text("Usuario de Cámara") },
+                    label = { Text(if (selectedBrand == CameraBrand.V720_NAXCLOW) "Usuario (Opcional)" else "Usuario de Cámara") },
+                    placeholder = { Text(if (selectedBrand == CameraBrand.V720_NAXCLOW) "Vacío en V720" else "admin") },
                     singleLine = true,
                     modifier = Modifier.weight(1f)
                 )
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("Contraseña de Cámara") },
+                    label = { Text(if (selectedBrand == CameraBrand.V720_NAXCLOW) "Clave (Opcional)" else "Contraseña de Cámara") },
+                    placeholder = { Text(if (selectedBrand == CameraBrand.V720_NAXCLOW) "Sin clave" else "") },
                     singleLine = true,
                     visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
@@ -949,6 +956,7 @@ fun LanDiscoveryDialog(
     onProvisionWaitingCamera: (WaitingCameraAp, String, String) -> Unit = { _, _, _ -> },
     onAddWaitingCameraDirect: (WaitingCameraAp) -> Unit = {},
     onOpenManualAdd: ((CameraBrand) -> Unit)? = null,
+    onAddBleCamera: ((CameraConfig) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -966,9 +974,16 @@ fun LanDiscoveryDialog(
     val isEmittingSound by CameraAcousticPairingEngine.isEmitting.collectAsState()
     val soundSecondsRemaining by CameraAcousticPairingEngine.secondsRemaining.collectAsState()
 
+    // Estados de Bluetooth LE (V720, A9, Xiaovv)
+    val bleDevices by BluetoothCameraEngine.discoveredDevices.collectAsState()
+    val isBleScanning by BluetoothCameraEngine.isScanning.collectAsState()
+    val bleProvisioningStatus by BluetoothCameraEngine.provisioningStatus.collectAsState()
+    var isBleProvisioning by remember { mutableStateOf(false) }
+
     DisposableEffect(Unit) {
         onDispose {
             CameraAcousticPairingEngine.stop()
+            BluetoothCameraEngine.stopBleScan(context)
         }
     }
 
@@ -988,9 +1003,13 @@ fun LanDiscoveryDialog(
         }
     }
 
-    // Al abrir la pestaña de cámaras nuevas en modo AP, escanear automáticamente
+    // Auto-escaneo según pestaña y método seleccionado
     LaunchedEffect(selectedTab, pairingMethod) {
-        if (selectedTab == 1 && pairingMethod == 2 && waitingCameraAps.isEmpty() && !isScanningWaiting) {
+        if (selectedTab == 1 && pairingMethod == 0 && bleDevices.isEmpty() && !isBleScanning) {
+            if (BluetoothCameraEngine.hasBluetoothPermission(context)) {
+                BluetoothCameraEngine.startBleScan(context)
+            }
+        } else if (selectedTab == 1 && pairingMethod == 3 && waitingCameraAps.isEmpty() && !isScanningWaiting) {
             onScanWaitingCameras()
         }
     }
@@ -1001,14 +1020,14 @@ fun LanDiscoveryDialog(
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = if (selectedTab == 0) Icons.Default.Radar else Icons.Default.WifiTethering,
+                        imageVector = if (selectedTab == 0) Icons.Default.Radar else Icons.Default.BluetoothSearching,
                         contentDescription = null,
                         tint = Color(0xFF38BDF8),
                         modifier = Modifier.size(24.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (selectedTab == 0) "Buscar Cámaras en Red" else "Cámaras Nuevas o Reseteadas",
+                        text = if (selectedTab == 0) "Buscar Cámaras en Red" else "Vincular Cámara (BLE / QR / AP)",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -1040,11 +1059,19 @@ fun LanDiscoveryDialog(
                     )
                     Tab(
                         selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
+                        onClick = {
+                            selectedTab = 1
+                            if (pairingMethod == 0 && !isBleScanning && bleDevices.isEmpty()) {
+                                if (BluetoothCameraEngine.hasBluetoothPermission(context)) {
+                                    BluetoothCameraEngine.startBleScan(context)
+                                }
+                            }
+                        },
                         text = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Nuevas / AP", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                if (waitingCameraAps.isNotEmpty()) {
+                                Text("Vincular / BLE", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                val count = bleDevices.size + waitingCameraAps.size
+                                if (count > 0) {
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Box(
                                         modifier = Modifier
@@ -1052,7 +1079,7 @@ fun LanDiscoveryDialog(
                                             .padding(horizontal = 5.dp, vertical = 1.dp)
                                     ) {
                                         Text(
-                                            text = "${waitingCameraAps.size}",
+                                            text = "$count",
                                             fontSize = 9.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Color.White
@@ -1061,7 +1088,7 @@ fun LanDiscoveryDialog(
                                 }
                             }
                         },
-                        icon = { Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                        icon = { Icon(Icons.Default.BluetoothSearching, contentDescription = null, modifier = Modifier.size(16.dp)) }
                     )
                 }
 
@@ -1098,28 +1125,46 @@ fun LanDiscoveryDialog(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 18.dp),
+                                .padding(vertical = 14.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    text = "Presiona 'Escanear Ahora' para buscar cámaras en tu red.",
+                                    text = "Presiona 'Escanear Red' para buscar cámaras en tu router.",
                                     fontSize = 12.sp,
                                     color = Color(0xFF94A3B8)
                                 )
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = "¿La cámara es nueva o la acabas de resetear? Toca la pestaña 'Nuevas / AP'.",
-                                    fontSize = 11.sp,
-                                    color = Color(0xFF38BDF8)
-                                )
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            selectedTab = 1
+                                            pairingMethod = 0
+                                            BluetoothCameraEngine.startBleScan(context)
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.Bluetooth, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "¿Cámara V720 o A9 no aparece en LAN?\nToca aquí para buscarla por Bluetooth.",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                    }
+                                }
                             }
                         }
                     } else {
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(250.dp),
+                                .height(220.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             items(discoveredDevices, key = { it.ipAddress }) { dev ->
@@ -1187,29 +1232,52 @@ fun LanDiscoveryDialog(
                         ) {
                             FilterChip(
                                 selected = pairingMethod == 0,
-                                onClick = { pairingMethod = 0 },
-                                label = { Text("1. Mostrar QR (Fácil)", fontSize = 11.sp, fontWeight = if (pairingMethod == 0) FontWeight.Bold else FontWeight.Normal) }
+                                onClick = {
+                                    pairingMethod = 0
+                                    if (!isBleScanning) {
+                                        BluetoothCameraEngine.startBleScan(context) { err ->
+                                            Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                label = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Bluetooth, contentDescription = null, modifier = Modifier.size(13.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("0. Bluetooth V720", fontSize = 11.sp, fontWeight = if (pairingMethod == 0) FontWeight.Bold else FontWeight.Normal)
+                                    }
+                                }
                             )
                             FilterChip(
                                 selected = pairingMethod == 1,
                                 onClick = { pairingMethod = 1 },
-                                label = { Text("2. Onda Sonora (Pitido)", fontSize = 11.sp, fontWeight = if (pairingMethod == 1) FontWeight.Bold else FontWeight.Normal) }
+                                label = { Text("1. Mostrar QR", fontSize = 11.sp, fontWeight = if (pairingMethod == 1) FontWeight.Bold else FontWeight.Normal) }
                             )
                             FilterChip(
                                 selected = pairingMethod == 2,
                                 onClick = { pairingMethod = 2 },
-                                label = { Text("3. Wi-Fi AP Cámara", fontSize = 11.sp, fontWeight = if (pairingMethod == 2) FontWeight.Bold else FontWeight.Normal) }
+                                label = { Text("2. Onda Sonora", fontSize = 11.sp, fontWeight = if (pairingMethod == 2) FontWeight.Bold else FontWeight.Normal) }
                             )
                             FilterChip(
                                 selected = pairingMethod == 3,
-                                onClick = { pairingMethod = 3 },
-                                label = { Text("4. Manual", fontSize = 11.sp, fontWeight = if (pairingMethod == 3) FontWeight.Bold else FontWeight.Normal) }
+                                onClick = {
+                                    pairingMethod = 3
+                                    if (waitingCameraAps.isEmpty() && !isScanningWaiting) {
+                                        onScanWaitingCameras()
+                                    }
+                                },
+                                label = { Text("3. Wi-Fi AP Cámara", fontSize = 11.sp, fontWeight = if (pairingMethod == 3) FontWeight.Bold else FontWeight.Normal) }
+                            )
+                            FilterChip(
+                                selected = pairingMethod == 4,
+                                onClick = { pairingMethod = 4 },
+                                label = { Text("4. Manual", fontSize = 11.sp, fontWeight = if (pairingMethod == 4) FontWeight.Bold else FontWeight.Normal) }
                             )
                         }
                     }
 
-                    // Datos Wi-Fi de Casa para los Métodos 1, 2 y 3
-                    if (pairingMethod in 0..2) {
+                    // Datos Wi-Fi de Casa para los Métodos 0, 1, 2 y 3
+                    if (pairingMethod in 0..3) {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
                             shape = RoundedCornerShape(10.dp),
@@ -1246,8 +1314,164 @@ fun LanDiscoveryDialog(
                         }
                     }
 
-                    // ---------- MÉTODO 0: MOSTRAR CÓDIGO QR AL LENTE (PREVALECE / POR DEFECTO) ----------
+                    // ---------- MÉTODO 0: VINCULACIÓN AUTOMÁTICA POR BLUETOOTH (V720 / A9 / BLE) ----------
                     if (pairingMethod == 0) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.BluetoothSearching,
+                                            contentDescription = null,
+                                            tint = Color(0xFF38BDF8),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Detección Bluetooth para V720 y cámaras BLE",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                    }
+                                    Text(
+                                        text = "Busca balizas Bluetooth de cámaras V720, A9, Naxclow, Xiaovv y similares para vincularlas a tu red sin pedir contraseñas ni IP manual.",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                }
+                            }
+
+                            if (isBleScanning) {
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = Color(0xFF38BDF8)
+                                )
+                                Text(
+                                    text = "Buscando cámaras Bluetooth cercanas (NAX*, V720*, A9*)...",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF38BDF8)
+                                )
+                            }
+
+                            if (!bleProvisioningStatus.isNullOrBlank()) {
+                                Text(
+                                    text = bleProvisioningStatus ?: "",
+                                    fontSize = 11.sp,
+                                    color = if (bleProvisioningStatus?.contains("Error", ignoreCase = true) == true) Color(0xFFEF4444) else Color(0xFF34D399)
+                                )
+                            }
+
+                            if (bleDevices.isNotEmpty()) {
+                                Text(
+                                    text = "Cámaras Bluetooth detectadas (${bleDevices.size}):",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF34D399)
+                                )
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 200.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    items(bleDevices, key = { it.address }) { dev ->
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Bluetooth,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFF38BDF8),
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Column {
+                                                            Text(dev.name, fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
+                                                            Text("${dev.brand.displayName} • MAC: ${dev.address} • RSSI: ${dev.rssi} dBm", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                                        }
+                                                    }
+                                                }
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Button(
+                                                        onClick = {
+                                                            isBleProvisioning = true
+                                                            BluetoothCameraEngine.provisionWifiOverBle(
+                                                                context = context,
+                                                                bleCamera = dev,
+                                                                ssid = homeWifiSsid,
+                                                                pass = homeWifiPassword,
+                                                                onStatus = { /* actualizado por StateFlow */ },
+                                                                onResult = { res ->
+                                                                    isBleProvisioning = false
+                                                                    res.onSuccess { msg ->
+                                                                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                                                        val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev)
+                                                                        onAddBleCamera?.invoke(cfg)
+                                                                    }.onFailure { err ->
+                                                                        Toast.makeText(context, err.message ?: "Error vinculando por Bluetooth", Toast.LENGTH_LONG).show()
+                                                                    }
+                                                                }
+                                                            )
+                                                        },
+                                                        enabled = homeWifiSsid.isNotBlank() && !isBleProvisioning,
+                                                        modifier = Modifier.weight(1f),
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669))
+                                                    ) {
+                                                        Text(if (isBleProvisioning) "Vinculando..." else "Vincular a mi Wi-Fi", fontSize = 11.sp)
+                                                    }
+                                                    OutlinedButton(
+                                                        onClick = {
+                                                            val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev)
+                                                            onAddBleCamera?.invoke(cfg)
+                                                        },
+                                                        modifier = Modifier.weight(1f)
+                                                    ) {
+                                                        Text("Agregar a FrCam", fontSize = 11.sp)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (!isBleScanning) {
+                                Button(
+                                    onClick = {
+                                        BluetoothCameraEngine.startBleScan(context) { err ->
+                                            Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.BluetoothSearching, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Escanear Cámaras Bluetooth Ahora", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------- MÉTODO 1: MOSTRAR CÓDIGO QR AL LENTE ----------
+                    if (pairingMethod == 1) {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1326,8 +1550,8 @@ fun LanDiscoveryDialog(
                         }
                     }
 
-                    // ---------- MÉTODO 1: EMITIR ONDA SONORA / PITIDO (SONIC PAIRING) ----------
-                    if (pairingMethod == 1) {
+                    // ---------- MÉTODO 2: EMITIR ONDA SONORA / PITIDO (SONIC PAIRING) ----------
+                    if (pairingMethod == 2) {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1399,8 +1623,8 @@ fun LanDiscoveryDialog(
                         }
                     }
 
-                    // ---------- MÉTODO 2: MODO AP (PUNTO DE ACCESO DE LA CÁMARA) ----------
-                    if (pairingMethod == 2) {
+                    // ---------- MÉTODO 3: MODO AP (PUNTO DE ACCESO DE LA CÁMARA) ----------
+                    if (pairingMethod == 3) {
                         if (isScanningWaiting) {
                             LinearProgressIndicator(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1495,8 +1719,8 @@ fun LanDiscoveryDialog(
                         }
                     }
 
-                    // ---------- MÉTODO 3: INGRESO MANUAL CON PLANTILLAS ----------
-                    if (pairingMethod == 3) {
+                    // ---------- MÉTODO 4: INGRESO MANUAL CON PLANTILLAS ----------
+                    if (pairingMethod == 4) {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -1547,7 +1771,18 @@ fun LanDiscoveryDialog(
                 ) {
                     Text(if (isScanning) "Escaneando..." else "Escanear Red")
                 }
-            } else if (pairingMethod == 2) {
+            } else if (pairingMethod == 0) {
+                Button(
+                    onClick = {
+                        BluetoothCameraEngine.startBleScan(context) { err ->
+                            Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    enabled = !isBleScanning
+                ) {
+                    Text(if (isBleScanning) "Buscando BLE..." else "Buscar Bluetooth")
+                }
+            } else if (pairingMethod == 3) {
                 Button(
                     onClick = onScanWaitingCameras,
                     enabled = !isScanningWaiting

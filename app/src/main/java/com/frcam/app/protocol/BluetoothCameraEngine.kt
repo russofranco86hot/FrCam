@@ -1,0 +1,390 @@
+package com.frcam.app.protocol
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattService
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.ParcelUuid
+import android.util.Log
+import androidx.core.content.ContextCompat
+import com.frcam.app.model.CameraBrand
+import com.frcam.app.model.CameraConfig
+import com.frcam.app.model.ConnectionMode
+import com.frcam.app.model.PtzControlType
+import com.frcam.app.model.StreamProtocol
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.util.UUID
+
+data class DiscoveredBleCamera(
+    val device: BluetoothDevice,
+    val name: String,
+    val address: String,
+    val rssi: Int,
+    val brand: CameraBrand = CameraBrand.V720_NAXCLOW,
+    val rawDeviceId: String = ""
+)
+
+/**
+ * Motor de detección y vinculación de cámaras mediante Bluetooth Low Energy (BLE).
+ * Especialmente diseñado para cámaras V720 (Naxclow, A9, Xiaovv) y dispositivos BLE
+ * que transmiten balizas Bluetooth para vinculación rápida sin ingresar IP ni contraseñas.
+ */
+object BluetoothCameraEngine {
+
+    private const val TAG = "BluetoothCameraEngine"
+
+    private val _discoveredDevices = MutableStateFlow<List<DiscoveredBleCamera>>(emptyList())
+    val discoveredDevices: StateFlow<List<DiscoveredBleCamera>> = _discoveredDevices.asStateFlow()
+
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+
+    private val _provisioningStatus = MutableStateFlow<String?>(null)
+    val provisioningStatus: StateFlow<String?> = _provisioningStatus.asStateFlow()
+
+    private var activeGatt: BluetoothGatt? = null
+    private var scanCallback: ScanCallback? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    fun hasBluetoothPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun isBluetoothEnabled(context: Context): Boolean {
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        return manager?.adapter?.isEnabled == true
+    }
+
+    @SuppressLint("MissingPermission")
+    fun startBleScan(context: Context, onError: (String) -> Unit = {}) {
+        if (!hasBluetoothPermission(context)) {
+            onError("Se requiere permiso de Bluetooth para buscar cámaras cercanas.")
+            return
+        }
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = manager?.adapter
+        if (adapter == null || !adapter.isEnabled) {
+            onError("Por favor activa el Bluetooth en tu celular para detectar la cámara V720.")
+            return
+        }
+
+        val scanner = adapter.bluetoothLeScanner
+        if (scanner == null) {
+            onError("El escáner Bluetooth de bajo consumo (BLE) no está disponible.")
+            return
+        }
+
+        stopBleScan(context)
+        _discoveredDevices.value = emptyList()
+        _isScanning.value = true
+
+        scanCallback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                result ?: return
+                processScanResult(result)
+            }
+
+            override fun onBatchScanResults(results: MutableList<ScanResult>?) {
+                results?.forEach { processScanResult(it) }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                Log.w(TAG, "BLE Scan failed with code: $errorCode")
+                _isScanning.value = false
+            }
+        }
+
+        try {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+            scanner.startScan(emptyList(), settings, scanCallback)
+
+            // Auto-stop tras 15 segundos
+            mainHandler.postDelayed({
+                stopBleScan(context)
+            }, 15000L)
+        } catch (e: Exception) {
+            _isScanning.value = false
+            onError("Error iniciando búsqueda Bluetooth: ${e.message}")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stopBleScan(context: Context? = null) {
+        if (_isScanning.value) {
+            try {
+                if (context != null && hasBluetoothPermission(context)) {
+                    val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                    manager?.adapter?.bluetoothLeScanner?.stopScan(scanCallback)
+                }
+            } catch (_: Exception) {}
+            _isScanning.value = false
+            scanCallback = null
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun processScanResult(result: ScanResult) {
+        val device = result.device ?: return
+        val name = device.name?.trim().orEmpty()
+        val address = device.address.orEmpty()
+        val rssi = result.rssi
+
+        val isCamera = isLikelyCameraBle(name, result)
+        if (!isCamera) return
+
+        val currentList = _discoveredDevices.value.toMutableList()
+        val existingIndex = currentList.indexOfFirst { it.address == address }
+
+        val brand = when {
+            name.startsWith("NAX", ignoreCase = true) ||
+                name.startsWith("V720", ignoreCase = true) ||
+                name.startsWith("A9", ignoreCase = true) ||
+                name.startsWith("JA", ignoreCase = true) ||
+                name.startsWith("FT", ignoreCase = true) ||
+                name.startsWith("BAT", ignoreCase = true) ||
+                name.startsWith("CAM", ignoreCase = true) ||
+                name.startsWith("BK", ignoreCase = true) ||
+                name.startsWith("XiaoV", ignoreCase = true) -> CameraBrand.V720_NAXCLOW
+            name.startsWith("VSTC", ignoreCase = true) || name.startsWith("EYE4", ignoreCase = true) -> CameraBrand.EYE4_VSTARCAM
+            name.startsWith("MV", ignoreCase = true) -> CameraBrand.V380_PRO
+            else -> CameraBrand.V720_NAXCLOW
+        }
+
+        val devId = when {
+            name.contains("_") -> name.substringAfterLast("_")
+            name.contains("-") -> name.substringAfterLast("-")
+            else -> address.replace(":", "").takeLast(6)
+        }
+
+        val bleCam = DiscoveredBleCamera(
+            device = device,
+            name = if (name.isNotBlank()) name else "Cámara V720 ($devId)",
+            address = address,
+            rssi = rssi,
+            brand = brand,
+            rawDeviceId = devId
+        )
+
+        if (existingIndex >= 0) {
+            currentList[existingIndex] = bleCam
+        } else {
+            currentList.add(bleCam)
+        }
+        _discoveredDevices.value = currentList
+    }
+
+    private fun isLikelyCameraBle(name: String, result: ScanResult): Boolean {
+        val upper = name.uppercase()
+        val cameraPrefixes = listOf(
+            "NAX", "V720", "A9", "JA_", "FT_", "BAT_", "CAM", "MINI", "BK_", "XIAOV", "IPC", "WF_", "720", "VSTC", "EYE4", "MV"
+        )
+        if (cameraPrefixes.any { upper.startsWith(it) || upper.contains(it) }) {
+            return true
+        }
+
+        // Reconocer balizas por Service UUID de cámaras comunes (Beken BK7252 / Naxclow / Tuya / Anyka)
+        val uuids = result.scanRecord?.serviceUuids.orEmpty().map { it.uuid.toString().lowercase() }
+        for (u in uuids) {
+            if (u.contains("fee7") || u.contains("fff0") || u.contains("ffe0") || u.contains("fe01") || u.contains("ba01")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Vincula la cámara enviando las credenciales Wi-Fi (SSID y Password) a través de Bluetooth GATT.
+     * La cámara recibe los datos por BLE, se conecta al router Wi-Fi de inmediato y queda lista para usar.
+     */
+    @SuppressLint("MissingPermission")
+    fun provisionWifiOverBle(
+        context: Context,
+        bleCamera: DiscoveredBleCamera,
+        ssid: String,
+        pass: String,
+        onStatus: (String) -> Unit,
+        onResult: (Result<String>) -> Unit
+    ) {
+        if (!hasBluetoothPermission(context)) {
+            onResult(Result.failure(Exception("Faltan permisos de Bluetooth para vincular.")))
+            return
+        }
+
+        stopBleScan(context)
+        _provisioningStatus.value = "Conectando por Bluetooth a ${bleCamera.name}..."
+        onStatus("Conectando con ${bleCamera.name} por Bluetooth...")
+
+        val timeoutRunnable = Runnable {
+            try {
+                activeGatt?.disconnect()
+                activeGatt?.close()
+                activeGatt = null
+            } catch (_: Exception) {}
+            _provisioningStatus.value = "Tiempo de espera agotado al conectar por Bluetooth"
+            onResult(Result.failure(Exception("No hubo respuesta de la cámara por Bluetooth. Verifica que esté encendida.")))
+        }
+        mainHandler.postDelayed(timeoutRunnable, 14000L)
+
+        activeGatt = bleCamera.device.connectGatt(
+            context,
+            false,
+            object : BluetoothGattCallback() {
+                override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
+                    if (newState == BluetoothProfile.STATE_CONNECTED) {
+                        mainHandler.post {
+                            _provisioningStatus.value = "¡Bluetooth conectado! Descubriendo servicios de la cámara..."
+                            onStatus("Descubriendo servicios de configuración en la cámara...")
+                        }
+                        try {
+                            gatt?.discoverServices()
+                        } catch (e: Exception) {
+                            finishWithError("Error descubriendo servicios: ${e.message}", onResult, timeoutRunnable)
+                        }
+                    } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                        Log.d(TAG, "BLE GATT desconectado")
+                    }
+                }
+
+                override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
+                    if (status != BluetoothGatt.GATT_SUCCESS || gatt == null) {
+                        finishWithError("No se pudieron leer los servicios de la cámara", onResult, timeoutRunnable)
+                        return
+                    }
+
+                    mainHandler.post {
+                        _provisioningStatus.value = "Enviando credenciales Wi-Fi por Bluetooth..."
+                        onStatus("Enviando nombre y clave Wi-Fi a la cámara...")
+                    }
+
+                    // Buscar característica de escritura
+                    val writeChar = findWritableCharacteristic(gatt.services)
+                    if (writeChar == null) {
+                        finishWithError("No se encontró canal de escritura en la cámara", onResult, timeoutRunnable)
+                        return
+                    }
+
+                    // Carga útil de configuración Wi-Fi
+                    val jsonPayload = """{"s":"${ssid.trim()}","p":"$pass"}"""
+                    val payloadBytes = jsonPayload.toByteArray(Charsets.UTF_8)
+
+                    @Suppress("DEPRECATION")
+                    writeChar.value = payloadBytes
+                    @Suppress("DEPRECATION")
+                    writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+
+                    val success = gatt.writeCharacteristic(writeChar)
+                    if (success) {
+                        mainHandler.removeCallbacks(timeoutRunnable)
+                        mainHandler.postDelayed({
+                            try {
+                                gatt.disconnect()
+                                gatt.close()
+                                activeGatt = null
+                            } catch (_: Exception) {}
+                            _provisioningStatus.value = "¡Wi-Fi configurado con éxito por Bluetooth!"
+                            onResult(Result.success("¡Credenciales enviadas a la cámara ${bleCamera.name}! Se conectará a '$ssid'."))
+                        }, 1500L)
+                    } else {
+                        finishWithError("Error al transmitir datos por Bluetooth", onResult, timeoutRunnable)
+                    }
+                }
+            },
+            BluetoothDevice.TRANSPORT_LE
+        )
+    }
+
+    private fun findWritableCharacteristic(services: List<BluetoothGattService>): BluetoothGattCharacteristic? {
+        // 1. Buscar en servicios comunes de cámaras V720 / Naxclow / Beken / Tuya
+        for (service in services) {
+            val sUuid = service.uuid.toString().lowercase()
+            for (char in service.characteristics) {
+                val prop = char.properties
+                val isWritable = (prop and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                    (prop and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                if (isWritable) {
+                    val cUuid = char.uuid.toString().lowercase()
+                    if (sUuid.contains("fee7") || sUuid.contains("fff0") || sUuid.contains("ffe0") ||
+                        cUuid.contains("fec7") || cUuid.contains("fff1") || cUuid.contains("ffe1")
+                    ) {
+                        return char
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: primera característica con permiso de escritura
+        for (service in services) {
+            for (char in service.characteristics) {
+                val prop = char.properties
+                if ((prop and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                    (prop and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                ) {
+                    return char
+                }
+            }
+        }
+        return null
+    }
+
+    private fun finishWithError(msg: String, onResult: (Result<String>) -> Unit, timeoutRunnable: Runnable) {
+        mainHandler.removeCallbacks(timeoutRunnable)
+        try {
+            activeGatt?.disconnect()
+            activeGatt?.close()
+            activeGatt = null
+        } catch (_: Exception) {}
+        mainHandler.post {
+            _provisioningStatus.value = msg
+            onResult(Result.failure(Exception(msg)))
+        }
+    }
+
+    /**
+     * Construye una configuración lista para FrCam a partir de una cámara descubierta por Bluetooth.
+     * En cámaras V720, el usuario y la contraseña quedan vacíos porque no se requieren.
+     */
+    fun createCameraConfigFromBle(bleCamera: DiscoveredBleCamera, hostIp: String = ""): CameraConfig {
+        return CameraConfig(
+            id = UUID.randomUUID().toString(),
+            name = bleCamera.name,
+            brand = CameraBrand.V720_NAXCLOW,
+            deviceId = bleCamera.rawDeviceId,
+            host = hostIp,
+            rtspPort = 554,
+            httpPort = 80,
+            onvifPort = 6123,
+            protocol = StreamProtocol.V720_LAN,
+            connectionMode = ConnectionMode.LAN_IP,
+            username = "",
+            password = "",
+            mainStreamPath = "/video",
+            subStreamPath = "/video",
+            ptzType = PtzControlType.NONE,
+            autoRecordMode = "OFF"
+        )
+    }
+}

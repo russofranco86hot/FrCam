@@ -87,6 +87,10 @@ class MainActivity : ComponentActivity() {
                         Manifest.permission.RECORD_AUDIO,
                         Manifest.permission.ACCESS_FINE_LOCATION
                     )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        list.add(Manifest.permission.BLUETOOTH_SCAN)
+                        list.add(Manifest.permission.BLUETOOTH_CONNECT)
+                    }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         list.add(Manifest.permission.POST_NOTIFICATIONS)
                         list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
@@ -385,6 +389,12 @@ class MainActivity : ComponentActivity() {
                                 protocol = brand.defaultProtocol,
                                 ptzType = brand.defaultPtzType
                             )
+                            showAddEditSheet = true
+                        },
+                        onAddBleCamera = { bleCamConfig ->
+                            showScannerDialog = false
+                            viewModel.clearDiagnostic()
+                            editingCamera = bleCamConfig
                             showAddEditSheet = true
                         },
                         onDismiss = {

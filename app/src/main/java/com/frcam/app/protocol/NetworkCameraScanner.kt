@@ -158,16 +158,24 @@ object NetworkCameraScanner {
                         completedHosts++
                         return@async
                     }
+                    // Excluir la IP de administración web del Router / Gateway doméstico (ej. 192.168.1.1 o .254)
+                    val isRouterGateway = ip.endsWith(".1") || ip.endsWith(".254") || ip == gatewayWanIp
                     semaphore.withPermit {
                         val openPorts = probeCameraPorts(ip, timeoutMs = 220)
                         if (openPorts.isNotEmpty()) {
+                            // Si es el router, solo aceptarlo si tiene explícitamente puertos de video/cámara abiertos (554, 8554, 8800, 10554, 6123)
+                            if (isRouterGateway && !openPorts.any { it in listOf(554, 8554, 8800, 10554, 6123, 16123) }) {
+                                completedHosts++
+                                return@withPermit
+                            }
+
                             val isCameraCandidate = openPorts.any {
-                                it in listOf(10554, 10080, 8800, 8899, 6123, 554, 8554, 2020, 8000, 81, 37777, 34567, 8081, 88, 7070)
+                                it in listOf(10554, 10080, 8800, 8899, 6123, 16123, 554, 8554, 2020, 8000, 81, 6600, 6001, 8001, 9988, 37777, 34567, 8081, 88, 7070)
                             } || openPorts.contains(8080) || openPorts.contains(80)
 
                             if (isCameraCandidate) {
-                                val validDevice = if (openPorts == listOf(80)) {
-                                    isLikelyCameraHttp(ip, 80)
+                                val validDevice = if (openPorts == listOf(80) || openPorts == listOf(8080) || openPorts == listOf(80, 8080)) {
+                                    isLikelyCameraHttp(ip, if (openPorts.contains(80)) 80 else 8080)
                                 } else {
                                     true
                                 }
@@ -319,6 +327,7 @@ object NetworkCameraScanner {
     }
 
     private fun isLikelyCameraHttp(ip: String, port: Int): Boolean {
+        if (ip.endsWith(".1") || ip.endsWith(".254")) return false
         return try {
             Socket().use { socket ->
                 socket.soTimeout = 400
@@ -338,16 +347,12 @@ object NetworkCameraScanner {
                     resp.contains("dahua") ||
                     resp.contains("mjpeg") ||
                     resp.contains("camera") ||
-                    resp.contains("realm=") ||
-                    resp.contains("basic realm") ||
-                    resp.contains("digest realm") ||
-                    resp.contains("boa/") ||
-                    resp.contains("mini-httpd") ||
-                    resp.contains("hipcam") ||
-                    resp.contains("netwave") ||
-                    resp.contains("webcam") ||
-                    resp.contains("live") ||
-                    resp.contains("video") ||
+                    resp.contains("realm=\"ip") ||
+                    resp.contains("realm=\"cam") ||
+                    resp.contains("realm=\"v720") ||
+                    resp.contains("video/x-motion-jpeg") ||
+                    resp.contains("multipart/x-mixed-replace") ||
+                    resp.contains("live.mjpg") ||
                     resp.contains("snapshot")
             }
         } catch (_: Exception) {
@@ -500,15 +505,15 @@ object NetworkCameraScanner {
                 val rtsp = if (openPorts.contains(8554) && !openPorts.contains(554)) 8554 else 554
                 DiscoveredCameraDevice(
                     ipAddress = ip,
-                    detectedBrand = if (onvifServiceUrl != null) CameraBrand.ONVIF_GENERIC else CameraBrand.V380_PRO,
+                    detectedBrand = if (onvifServiceUrl != null) CameraBrand.ONVIF_GENERIC else CameraBrand.CUSTOM_RTSP,
                     deviceName = if (onvifServiceUrl != null) "Cámara ONVIF ($ip)" else "Cámara RTSP ($ip)",
                     openPorts = openPorts,
                     rtspPort = rtsp,
                     httpPort = 80,
                     onvifPort = 80,
                     onvifServiceUrl = onvifServiceUrl,
-                    suggestedMainPath = "/live/ch00_1",
-                    suggestedSubPath = "/live/ch00_0",
+                    suggestedMainPath = if (onvifServiceUrl != null) "/live/ch00_1" else "/live/ch0",
+                    suggestedSubPath = if (onvifServiceUrl != null) "/live/ch00_0" else "/live/ch0",
                     macOrHardwareInfo = "Puertos abiertos: ${openPorts.joinToString(", ")}"
                 )
             }
