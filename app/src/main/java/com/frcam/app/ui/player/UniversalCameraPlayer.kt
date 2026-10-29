@@ -81,11 +81,13 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.frcam.app.media.CameraAudioPlayer
+import com.frcam.app.media.CameraMediaEngine
 import com.frcam.app.media.FrameMotionDetector
 import com.frcam.app.media.LiveMp4VideoRecorder
 import com.frcam.app.data.AppSettings
 import com.frcam.app.data.AutoRecordMode
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.ConnectionMode
 import com.frcam.app.model.StreamProtocol
@@ -204,22 +206,55 @@ fun UniversalCameraPlayer(
             return@LaunchedEffect
         }
         while (isActive) {
-            delay(650L)
+            delay(500L)
             val frame = internalHandle.captureCurrentBitmap(640, 360)
             if (frame != null && !frame.isRecycled) {
-                val score = withContext(Dispatchers.Default) {
+                val motionResult = withContext(Dispatchers.Default) {
                     motionDetector.inspectFrame(
                         context = context,
                         cameraId = camera.id,
                         cameraName = camera.name,
                         frameBitmap = frame,
-                        notify = camera.motionDetectionEnabled
+                        notify = false,
+                        sensitivity = AppSettings.motionSensitivity
                     )
                 }
-                if (score >= AppSettings.motionSensitivity.minAreaPercent) {
+                if (motionResult.isTriggered) {
                     lastMotionBannerTimeMs = System.currentTimeMillis()
                     lastMotionAtMs = lastMotionBannerTimeMs
                     motionActiveBanner = true
+
+                    if (camera.motionDetectionEnabled) {
+                        val triggerFrame = frame.copy(Bitmap.Config.ARGB_8888, false)
+                        val preFrames = motionResult.validPreFrames
+                        val aiResult = motionResult.aiResult
+                        val pct = motionResult.percent
+
+                        launch(Dispatchers.Default) {
+                            val burstList = mutableListOf<Bitmap>()
+                            burstList.addAll(preFrames)
+                            burstList.add(triggerFrame)
+
+                            // Capturar 5 cuadros posteriores espaciados 220ms para capturar el movimiento real fluido
+                            for (step in 1..5) {
+                                delay(220L)
+                                val postFrame = internalHandle.captureCurrentBitmap(640, 360)
+                                if (postFrame != null && !postFrame.isRecycled && !CameraMediaEngine.isBlackOrEmptyFrame(postFrame)) {
+                                    burstList.add(postFrame.copy(Bitmap.Config.ARGB_8888, false))
+                                }
+                            }
+
+                            CameraMediaEngine.notifyMotionDetected(
+                                context = context,
+                                cameraId = camera.id,
+                                cameraName = camera.name,
+                                motionPercent = pct,
+                                rawBitmap = triggerFrame,
+                                burstFrames = burstList,
+                                aiDetection = aiResult
+                            )
+                        }
+                    }
                 }
             }
             if (motionActiveBanner && (System.currentTimeMillis() - lastMotionBannerTimeMs) > 4000L) {

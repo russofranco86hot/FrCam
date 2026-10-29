@@ -255,6 +255,9 @@ class MainActivity : ComponentActivity() {
                             editingCamera = cam
                             showAddEditSheet = true
                         },
+                        onDeleteCamera = { cam ->
+                            viewModel.deleteCamera(cam.id)
+                        },
                         onToggleLiveDashboard = { cam, active ->
                             viewModel.toggleLiveDashboard(cam, active)
                         },
@@ -280,6 +283,11 @@ class MainActivity : ComponentActivity() {
                         },
                         onSave = { updated ->
                             viewModel.addOrUpdateCamera(updated)
+                        },
+                        onDelete = { camId ->
+                            viewModel.deleteCamera(camId)
+                            showAddEditSheet = false
+                            editingCamera = null
                         },
                         onDismiss = {
                             showAddEditSheet = false

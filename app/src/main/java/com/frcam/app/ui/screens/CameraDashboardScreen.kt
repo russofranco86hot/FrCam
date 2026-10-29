@@ -31,6 +31,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileDownload
@@ -55,6 +57,7 @@ import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -108,6 +111,7 @@ fun CameraDashboardScreen(
     onAddCamera: (CameraBrand?) -> Unit,
     onSelectCamera: (CameraConfig) -> Unit,
     onEditCamera: (CameraConfig) -> Unit,
+    onDeleteCamera: (CameraConfig) -> Unit,
     onToggleLiveDashboard: (CameraConfig, Boolean) -> Unit,
     onToggleMotion: (CameraConfig, Boolean) -> Unit,
     onOpenSettings: () -> Unit,
@@ -118,6 +122,7 @@ fun CameraDashboardScreen(
     val context = LocalContext.current
     var showBackupDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var cameraToDelete by remember { mutableStateOf<CameraConfig?>(null) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -196,6 +201,54 @@ fun CameraDashboardScreen(
             confirmButton = {
                 Button(onClick = { showBackupDialog = false }) {
                     Text("Cerrar")
+                }
+            }
+        )
+    }
+
+    if (cameraToDelete != null) {
+        val targetCam = cameraToDelete!!
+        AlertDialog(
+            onDismissRequest = { cameraToDelete = null },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.DeleteOutline,
+                    contentDescription = null,
+                    tint = Color(0xFFEF4444),
+                    modifier = Modifier.size(32.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "¿Eliminar Cámara?",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp
+                )
+            },
+            text = {
+                Text(
+                    text = "¿Estás seguro de que deseas eliminar \"${targetCam.name}\"? Se quitará de la pantalla principal.",
+                    fontSize = 13.sp,
+                    color = Color(0xFFCBD5E1)
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cam = cameraToDelete
+                        cameraToDelete = null
+                        if (cam != null) {
+                            onDeleteCamera(cam)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
+                ) {
+                    Text("Eliminar", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { cameraToDelete = null }) {
+                    Text("Cancelar")
                 }
             }
         )
@@ -374,7 +427,8 @@ fun CameraDashboardScreen(
                         onToggleLiveDashboard = { active -> onToggleLiveDashboard(camera, active) },
                         onToggleMotion = { enabled -> onToggleMotion(camera, enabled) },
                         onOpenDetail = { onSelectCamera(camera) },
-                        onEdit = { onEditCamera(camera) }
+                        onEdit = { onEditCamera(camera) },
+                        onDelete = { cameraToDelete = camera }
                     )
                 }
             }
@@ -389,7 +443,8 @@ private fun CameraGridTile(
     onToggleLiveDashboard: (Boolean) -> Unit,
     onToggleMotion: (Boolean) -> Unit,
     onOpenDetail: () -> Unit,
-    onEdit: () -> Unit
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
 ) {
     var isMuted by remember(camera.id) { mutableStateOf(true) }
     val useSubStreamInGrid = isCompact && camera.preferSubStreamInGrid
@@ -581,6 +636,17 @@ private fun CameraGridTile(
                             imageVector = Icons.Default.Edit,
                             contentDescription = "Editar",
                             tint = Color(0xFF94A3B8),
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "Eliminar cámara",
+                            tint = Color(0xFFEF4444),
                             modifier = Modifier.size(15.dp)
                         )
                     }

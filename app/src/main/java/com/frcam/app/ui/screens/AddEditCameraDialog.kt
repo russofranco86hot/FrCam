@@ -40,6 +40,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddCircleOutline
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Close
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.filled.SdCard
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -104,9 +106,11 @@ fun AddEditCameraSheet(
     diagnosticResult: ConnectionDiagnosticResult?,
     onTestConnection: (CameraConfig, (String) -> Unit) -> Unit,
     onSave: (CameraConfig) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onDelete: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     var selectedBrand by remember {
         mutableStateOf(initialCamera?.brand ?: CameraBrand.V380_PRO)
@@ -633,8 +637,59 @@ fun AddEditCameraSheet(
                 }
             }
 
+            if (initialCamera != null && initialCamera.id.isNotBlank() && onDelete != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = { showDeleteConfirm = true },
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Eliminar Cámara de FrCam", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+            }
+
             Spacer(modifier = Modifier.height(28.dp))
         }
+    }
+
+    if (showDeleteConfirm && initialCamera != null && onDelete != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.DeleteOutline,
+                    contentDescription = null,
+                    tint = Color(0xFFEF4444),
+                    modifier = Modifier.size(32.dp)
+                )
+            },
+            title = { Text("¿Eliminar Cámara?", fontWeight = FontWeight.Bold) },
+            text = { Text("¿Estás seguro de que deseas eliminar permanentemente \"${name}\" de tu lista de cámaras?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirm = false
+                        onDelete(initialCamera.id)
+                        onDismiss()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
+                ) {
+                    Text("Eliminar", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 
     if (showV380IniDialog) {

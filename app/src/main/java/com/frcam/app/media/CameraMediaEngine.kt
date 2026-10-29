@@ -60,6 +60,13 @@ data class MotionEventRecord(
     val aiLabel: String? = null
 )
 
+data class MotionDetectionResult(
+    val isTriggered: Boolean,
+    val percent: Float,
+    val validPreFrames: List<Bitmap> = emptyList(),
+    val aiResult: AiDetection? = null
+)
+
 object CameraMediaEngine {
 
     private const val MOTION_CHANNEL_ID = "frcam_motion_alerts"
@@ -81,8 +88,38 @@ object CameraMediaEngine {
         }
     }
 
+    /**
+     * Determina si un fotograma capturado es completamente negro o vacío (debido a que el reproductor
+     * o decodificador aún está inicializándose o conectando). Evita que los GIFs arranquen en negro.
+     */
+    fun isBlackOrEmptyFrame(bitmap: Bitmap): Boolean {
+        if (bitmap.isRecycled) return true
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return true
+        var nonBlackCount = 0
+        val stepX = (w / 12).coerceAtLeast(1)
+        val stepY = (h / 8).coerceAtLeast(1)
+        var total = 0
+        for (y in 0 until h step stepY) {
+            for (x in 0 until w step stepX) {
+                val c = bitmap.getPixel(x, y)
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                // Cualquier píxel con color o iluminación superior a la penumbra absoluta
+                if (r > 18 || g > 18 || b > 18) {
+                    nonBlackCount++
+                }
+                total++
+            }
+        }
+        return total > 0 && (nonBlackCount.toFloat() / total.toFloat()) < 0.06f
+    }
+
     fun createMotionGif(context: Context, cameraId: String, frames: List<Bitmap>): File? {
-        if (frames.isEmpty()) return null
+        val nonBlackFrames = frames.filter { !it.isRecycled && !isBlackOrEmptyFrame(it) }
+        if (nonBlackFrames.isEmpty()) return null
         return try {
             val cacheDir = File(context.cacheDir, "motion_gifs").apply { mkdirs() }
             val gifFile = File(cacheDir, "motion_${cameraId}_${System.currentTimeMillis()}.gif")
@@ -90,8 +127,8 @@ object CameraMediaEngine {
             val encoder = AnimatedGifEncoder()
             encoder.start(fos)
             encoder.setRepeat(0)
-            encoder.setDelay(280) // ~3.5 FPS animated preview
-            for (f in frames) {
+            encoder.setDelay(220) // ~4.5 FPS reproducción fluida del movimiento
+            for (f in nonBlackFrames) {
                 val scaled = Bitmap.createScaledBitmap(f, 320, 180, true)
                 encoder.addFrame(scaled)
                 if (scaled !== f) scaled.recycle()
@@ -442,11 +479,16 @@ class FrameMotionDetector(
         frameBitmap: Bitmap,
         notify: Boolean = true,
         sensitivity: MotionSensitivity = AppSettings.motionSensitivity
-    ): Float {
+    ): MotionDetectionResult {
         return try {
+            // 1. Ignorar completamente fotogramas negros o vacíos de arranque para no contaminar el GIF
+            if (CameraMediaEngine.isBlackOrEmptyFrame(frameBitmap)) {
+                return MotionDetectionResult(isTriggered = false, percent = 0f)
+            }
+
             val copyForBuffer = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
             rollingFrames.add(copyForBuffer)
-            if (rollingFrames.size > 5) {
+            if (rollingFrames.size > 3) {
                 val old = rollingFrames.removeAt(0)
                 if (!old.isRecycled) old.recycle()
             }
@@ -467,12 +509,12 @@ class FrameMotionDetector(
             if (warmupFramesRemaining > 0) {
                 warmupFramesRemaining--
                 previousLuma = currentLuma
-                return 0f
+                return MotionDetectionResult(isTriggered = false, percent = 0f)
             }
 
             val prev = previousLuma
             previousLuma = currentLuma
-            if (prev == null) return 0f
+            if (prev == null) return MotionDetectionResult(isTriggered = false, percent = 0f)
 
             var minX = gridW
             var maxX = -1
@@ -515,10 +557,7 @@ class FrameMotionDetector(
 
             val meetsThreshold = percent >= sensitivity.minAreaPercent && isClustered
 
-            if (notify && meetsThreshold && (now - lastTriggerTimeMs) >= cooldownMs) {
-                val copyForAlert = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                val burst = rollingFrames.map { it.copy(Bitmap.Config.ARGB_8888, false) }
-
+            if (meetsThreshold && (now - lastTriggerTimeMs) >= cooldownMs) {
                 // Análisis IA inteligente si está habilitado
                 val aiResult = if (AppSettings.aiDetectionEnabled) {
                     CameraAiDetector.analyzeFrame(frameBitmap)
@@ -532,20 +571,34 @@ class FrameMotionDetector(
 
                 if (!shouldSuppress) {
                     lastTriggerTimeMs = now
-                    CameraMediaEngine.notifyMotionDetected(
-                        context = context,
-                        cameraId = cameraId,
-                        cameraName = cameraName,
-                        motionPercent = percent,
-                        rawBitmap = copyForAlert,
-                        burstFrames = burst,
-                        aiDetection = aiResult
+                    val validPre = rollingFrames
+                        .filter { !it.isRecycled && !CameraMediaEngine.isBlackOrEmptyFrame(it) }
+                        .map { it.copy(Bitmap.Config.ARGB_8888, false) }
+
+                    if (notify) {
+                        val copyForAlert = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        CameraMediaEngine.notifyMotionDetected(
+                            context = context,
+                            cameraId = cameraId,
+                            cameraName = cameraName,
+                            motionPercent = percent,
+                            rawBitmap = copyForAlert,
+                            burstFrames = validPre + copyForAlert,
+                            aiDetection = aiResult
+                        )
+                    }
+
+                    return MotionDetectionResult(
+                        isTriggered = true,
+                        percent = percent,
+                        validPreFrames = validPre,
+                        aiResult = aiResult
                     )
                 }
             }
-            percent
+            MotionDetectionResult(isTriggered = false, percent = percent)
         } catch (_: Exception) {
-            0f
+            MotionDetectionResult(isTriggered = false, percent = 0f)
         }
     }
 
