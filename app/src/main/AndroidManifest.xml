@@ -44,6 +44,18 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <service
+            android:name="com.frcam.app.wear.PhoneWearSyncService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/frcam" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+            </intent-filter>
+        </service>
+
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
             android:value="label,ica" />

@@ -53,6 +53,10 @@ class MainActivity : ComponentActivity() {
         wearMessageListener = PhoneWearSyncEngine.registerListener(this) {
             viewModel.cameras.value
         }
+        val currentCams = viewModel.cameras.value
+        if (currentCams.isNotEmpty()) {
+            PhoneWearSyncEngine.syncCamerasToWatch(this, currentCams)
+        }
     }
 
     override fun onStop() {
