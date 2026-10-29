@@ -23,13 +23,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import com.frcam.app.data.AppSettings
 import com.frcam.app.media.CameraMediaEngine
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.GridLayoutMode
 import com.frcam.app.ui.screens.AddEditCameraSheet
+import com.frcam.app.ui.screens.AppSettingsDialog
 import com.frcam.app.ui.screens.CameraDashboardScreen
 import com.frcam.app.ui.screens.LanDiscoveryDialog
+import com.frcam.app.ui.screens.MediaGalleryDialog
 import com.frcam.app.ui.screens.MotionEventsHistoryDialog
 import com.frcam.app.ui.screens.RingCloudLoginDialog
 import com.frcam.app.ui.screens.SingleCameraDetailScreen
@@ -51,6 +54,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        AppSettings.init(this)
         acquireWifiMulticastLock()
 
         handleNotificationIntent(intent)
@@ -106,6 +110,8 @@ class MainActivity : ComponentActivity() {
                 var showScannerDialog by remember { mutableStateOf(false) }
                 var showRingDialog by remember { mutableStateOf(false) }
                 var showMotionHistoryDialog by remember { mutableStateOf(false) }
+                var showSettingsDialog by remember { mutableStateOf(false) }
+                var showGalleryDialog by remember { mutableStateOf(false) }
 
                 val activeDetailCamera = cameras.find { it.id == selectedCameraId }
 
@@ -187,6 +193,9 @@ class MainActivity : ComponentActivity() {
                         },
                         onFactoryReset = {
                             viewModel.factoryResetCamera(activeDetailCamera)
+                        },
+                        onUpdateCamera = { updatedCam ->
+                            viewModel.addOrUpdateCamera(updatedCam)
                         }
                     )
                 } else {
@@ -211,6 +220,12 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenMotionHistory = {
                             showMotionHistoryDialog = true
+                        },
+                        onOpenSettings = {
+                            showSettingsDialog = true
+                        },
+                        onOpenGallery = {
+                            showGalleryDialog = true
                         },
                         onAddCamera = { preselectedBrand: CameraBrand? ->
                             viewModel.clearDiagnostic()
@@ -242,6 +257,9 @@ class MainActivity : ComponentActivity() {
                         },
                         onToggleLiveDashboard = { cam, active ->
                             viewModel.toggleLiveDashboard(cam, active)
+                        },
+                        onToggleMotion = { cam, enabled ->
+                            viewModel.toggleMotionDetection(cam.id, enabled)
                         },
                         onExportCameras = { ctx, uri, callback ->
                             viewModel.exportCamerasToUri(ctx, uri, callback)
@@ -317,6 +335,18 @@ class MainActivity : ComponentActivity() {
                         onSelectCamera = { camId: String ->
                             viewModel.selectCamera(camId)
                         }
+                    )
+                }
+
+                if (showSettingsDialog) {
+                    AppSettingsDialog(
+                        onDismiss = { showSettingsDialog = false }
+                    )
+                }
+
+                if (showGalleryDialog) {
+                    MediaGalleryDialog(
+                        onDismiss = { showGalleryDialog = false }
                     )
                 }
             }

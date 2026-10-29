@@ -90,13 +90,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.frcam.app.data.AppSettings
+import com.frcam.app.data.AutoRecordMode
 import com.frcam.app.model.CameraAccessRecord
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.CameraDeviceInfo
 import com.frcam.app.model.WifiNetworkScanResult
 
 enum class AdminTab(val title: String) {
-    INFO("Info Dispositivo"),
+    INFO("Configuración de dispositivo"),
+    MODES("Configuración de modos"),
     WIFI("Red Wi-Fi"),
     PASSWORD("Contraseña"),
     TIME("Hora / Reloj"),
@@ -127,7 +130,8 @@ fun CameraAdminBottomSheet(
     onTogglePtzPatrol: (Boolean) -> Unit,
     onFormatSdCard: () -> Unit,
     onReboot: () -> Unit,
-    onFactoryReset: () -> Unit
+    onFactoryReset: () -> Unit,
+    onUpdateCamera: (CameraConfig) -> Unit = {}
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedTab by remember { mutableStateOf(AdminTab.INFO) }
@@ -226,6 +230,7 @@ fun CameraAdminBottomSheet(
             ) {
                 when (selectedTab) {
                     AdminTab.INFO -> DeviceInfoTab(camera, deviceInfo, onSyncTime)
+                    AdminTab.MODES -> ModesTab(camera, onUpdateCamera)
                     AdminTab.WIFI -> WifiSettingsTab(
                         camera = camera,
                         deviceInfo = deviceInfo,
@@ -326,6 +331,84 @@ fun CameraAdminBottomSheet(
                     Text("Cancelar")
                 }
             }
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ModesTab(camera: CameraConfig, onUpdateCamera: (CameraConfig) -> Unit) {
+    @Composable
+    fun ModeSwitch(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = checked, onCheckedChange = onChange)
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text("Modos de funcionamiento", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+
+        ModeSwitch(
+            title = "Vista previa en pantalla principal",
+            subtitle = "Muestra el video en vivo en la tarjeta. Puede estar apagada y seguir vigilando.",
+            checked = camera.liveInDashboard,
+            onChange = { onUpdateCamera(camera.copy(liveInDashboard = it)) }
+        )
+        ModeSwitch(
+            title = "Notificaciones de movimiento",
+            subtitle = "Envía alerta con GIF animado. Funciona con o sin vista previa.",
+            checked = camera.motionDetectionEnabled,
+            onChange = { onUpdateCamera(camera.copy(motionDetectionEnabled = it)) }
+        )
+        ModeSwitch(
+            title = "Audio silenciado al abrir",
+            subtitle = "Al abrir la cámara el sonido empieza apagado; se activa con el botón del parlante.",
+            checked = camera.audioMutedByDefault,
+            onChange = { onUpdateCamera(camera.copy(audioMutedByDefault = it)) }
+        )
+
+        HorizontalDivider()
+
+        Text("Grabación automática", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(AutoRecordMode.OFF, AutoRecordMode.MOTION, AutoRecordMode.SCHEDULE).forEach { mode ->
+                FilterChip(
+                    selected = camera.autoRecordMode == mode,
+                    onClick = { onUpdateCamera(camera.copy(autoRecordMode = mode)) },
+                    label = { Text(AutoRecordMode.label(mode), fontSize = 12.sp) }
+                )
+            }
+        }
+        Text(
+            text = when (camera.autoRecordMode) {
+                AutoRecordMode.MOTION ->
+                    "Graba clips de ${AppSettings.motionClipSeconds} s cada vez que detecta movimiento. " +
+                        "Se guardan en Galería › Movies/FrCam."
+                AutoRecordMode.SCHEDULE ->
+                    "Graba de forma continua de ${AppSettings.formatMinutes(AppSettings.scheduleStartMinutes)} a " +
+                        "${AppSettings.formatMinutes(AppSettings.scheduleEndMinutes)} en archivos de " +
+                        "${AppSettings.scheduleSegmentMinutes} min."
+                else -> "No graba automáticamente. Puedes grabar a mano desde la pantalla de la cámara."
+            },
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "La duración y la franja horaria se cambian en Ajustes › Grabación. " +
+                "La grabación automática funciona mientras FrCam está abierta.",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }

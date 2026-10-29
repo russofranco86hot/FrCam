@@ -414,7 +414,8 @@ class FrameMotionDetector(
         context: Context,
         cameraId: String,
         cameraName: String,
-        frameBitmap: Bitmap
+        frameBitmap: Bitmap,
+        notify: Boolean = true
     ): Float {
         return try {
             val copyForBuffer = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
@@ -457,7 +458,7 @@ class FrameMotionDetector(
             val percent = (changedCells * 100f) / (gridW * gridH).toFloat()
             val now = System.currentTimeMillis()
 
-            if (percent >= motionAreaThresholdPercent && (now - lastTriggerTimeMs) >= cooldownMs) {
+            if (notify && percent >= motionAreaThresholdPercent && (now - lastTriggerTimeMs) >= cooldownMs) {
                 lastTriggerTimeMs = now
                 val copyForAlert = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
                 val burst = rollingFrames.map { it.copy(Bitmap.Config.ARGB_8888, false) }

@@ -4,6 +4,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import com.frcam.app.data.AppSettings
 
 private val FrCamDarkColorScheme = darkColorScheme(
     primary = Color(0xFF38BDF8),
@@ -24,10 +25,39 @@ private val FrCamDarkColorScheme = darkColorScheme(
     error = Color(0xFFF87171)
 )
 
+/** Variante AMOLED: negro puro en fondos para apagar píxeles y ahorrar batería. */
+private val FrCamAmoledColorScheme = FrCamDarkColorScheme.copy(
+    background = Color.Black,
+    surface = Color.Black,
+    surfaceVariant = Color(0xFF14181F),
+    surfaceContainerLowest = Color.Black,
+    surfaceContainerLow = Color(0xFF050505),
+    surfaceContainer = Color(0xFF0A0A0A),
+    surfaceContainerHigh = Color(0xFF111111),
+    surfaceContainerHighest = Color(0xFF181818),
+    primaryContainer = Color(0xFF082F49),
+    secondaryContainer = Color(0xFF0B3340)
+)
+
+/**
+ * Paleta de fondos usada por las pantallas. Se resuelve según el ajuste AMOLED,
+ * y al leer un estado de Compose la interfaz se actualiza en caliente.
+ */
+object FrColors {
+    private val amoled get() = AppSettings.amoled
+
+    val background: Color get() = if (amoled) Color.Black else Color(0xFF090D16)
+    val deepest: Color get() = if (amoled) Color.Black else Color(0xFF070B14)
+    val surface: Color get() = if (amoled) Color.Black else Color(0xFF111827)
+    val surfaceAlt: Color get() = if (amoled) Color(0xFF080808) else Color(0xFF0F172A)
+    val card: Color get() = if (amoled) Color(0xFF0B0B0B) else Color(0xFF141D2F)
+    val cardHigh: Color get() = if (amoled) Color(0xFF141414) else Color(0xFF1E293B)
+}
+
 @Composable
 fun FrCamTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = FrCamDarkColorScheme,
+        colorScheme = if (AppSettings.amoled) FrCamAmoledColorScheme else FrCamDarkColorScheme,
         content = content
     )
 }

@@ -1,5 +1,7 @@
 package com.frcam.app.ui.screens
 
+import com.frcam.app.ui.theme.FrColors
+
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -47,6 +49,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.OpenWith
@@ -144,7 +147,8 @@ fun SingleCameraDetailScreen(
     onTogglePtzPatrol: (Boolean) -> Unit,
     onFormatSdCard: () -> Unit,
     onReboot: () -> Unit,
-    onFactoryReset: () -> Unit
+    onFactoryReset: () -> Unit,
+    onUpdateCamera: (CameraConfig) -> Unit = {}
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -161,6 +165,7 @@ fun SingleCameraDetailScreen(
     var recordingSeconds by remember(camera.id) { mutableIntStateOf(0) }
     var mediaFeedback by remember(camera.id) { mutableStateOf<String?>(null) }
     var showAdminSheet by remember(camera.id) { mutableStateOf(false) }
+    var showGalleryDialog by remember { mutableStateOf(false) }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -218,6 +223,13 @@ fun SingleCameraDetailScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = { showGalleryDialog = true }) {
+                            Icon(
+                                imageVector = Icons.Default.PhotoLibrary,
+                                contentDescription = "Galería de imágenes y videos",
+                                tint = Color(0xFFA78BFA)
+                            )
+                        }
                         IconButton(onClick = onEnterPipMode) {
                             Icon(
                                 imageVector = Icons.Default.PictureInPictureAlt,
@@ -497,7 +509,7 @@ fun SingleCameraDetailScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF111827))
+                    .background(FrColors.surface)
                     .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Row(
@@ -671,6 +683,16 @@ fun SingleCameraDetailScreen(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Foto", fontSize = 12.sp)
                     }
+
+                    // 3. View Saved Media Gallery
+                    FilledTonalButton(
+                        onClick = { showGalleryDialog = true },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFFA78BFA))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Galería", fontSize = 12.sp)
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
@@ -752,7 +774,7 @@ fun SingleCameraDetailScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 6.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141D2F)),
+                    colors = CardDefaults.cardColors(containerColor = FrColors.card),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Column(
@@ -803,7 +825,7 @@ fun SingleCameraDetailScreen(
                                     .size(176.dp)
                                     .clip(CircleShape)
                                     .background(Color(0xFF0B111E))
-                                    .border(1.5.dp, Color(0xFF1E293B), CircleShape),
+                                    .border(1.5.dp, FrColors.cardHigh, CircleShape),
                                 contentAlignment = Alignment.Center
                             ) {
                                 FilledTonalIconButton(
@@ -1014,7 +1036,7 @@ fun SingleCameraDetailScreen(
                         FilledTonalButton(
                             onClick = { isMuted = !isMuted },
                             colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = if (!isMuted) Color(0xFF065F46) else Color(0xFF1E293B),
+                                containerColor = if (!isMuted) Color(0xFF065F46) else FrColors.cardHigh,
                                 contentColor = if (!isMuted) Color(0xFF6EE7B7) else Color(0xFFCBD5E1)
                             ),
                             modifier = Modifier.weight(1f)
@@ -1121,7 +1143,7 @@ fun SingleCameraDetailScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 4.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+                colors = CardDefaults.cardColors(containerColor = FrColors.surface),
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
@@ -1183,7 +1205,14 @@ fun SingleCameraDetailScreen(
             onTogglePtzPatrol = onTogglePtzPatrol,
             onFormatSdCard = onFormatSdCard,
             onReboot = onReboot,
-            onFactoryReset = onFactoryReset
+            onFactoryReset = onFactoryReset,
+            onUpdateCamera = onUpdateCamera
+        )
+    }
+
+    if (showGalleryDialog) {
+        MediaGalleryDialog(
+            onDismiss = { showGalleryDialog = false }
         )
     }
 }

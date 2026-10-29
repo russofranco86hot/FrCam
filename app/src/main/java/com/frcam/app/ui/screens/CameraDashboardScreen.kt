@@ -1,5 +1,7 @@
 package com.frcam.app.ui.screens
 
+import com.frcam.app.ui.theme.FrColors
+
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
@@ -37,6 +39,11 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.Radar
@@ -99,6 +106,9 @@ fun CameraDashboardScreen(
     onSelectCamera: (CameraConfig) -> Unit,
     onEditCamera: (CameraConfig) -> Unit,
     onToggleLiveDashboard: (CameraConfig, Boolean) -> Unit,
+    onToggleMotion: (CameraConfig, Boolean) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenGallery: () -> Unit,
     onExportCameras: (Context, Uri, (String) -> Unit) -> Unit,
     onImportCameras: (Context, Uri, (Result<Int>) -> Unit) -> Unit
 ) {
@@ -242,6 +252,20 @@ fun CameraDashboardScreen(
                             tint = Color(0xFF38BDF8)
                         )
                     }
+                    IconButton(onClick = onOpenGallery) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoLibrary,
+                            contentDescription = "Galería de fotos, videos y GIF",
+                            tint = Color(0xFFA78BFA)
+                        )
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Ajustes",
+                            tint = Color(0xFFCBD5E1)
+                        )
+                    }
                     IconButton(onClick = onToggleGridMode) {
                         Icon(
                             imageVector = when (gridMode) {
@@ -295,6 +319,7 @@ fun CameraDashboardScreen(
                         camera = camera,
                         isCompact = gridMode.columns >= 2,
                         onToggleLiveDashboard = { active -> onToggleLiveDashboard(camera, active) },
+                        onToggleMotion = { enabled -> onToggleMotion(camera, enabled) },
                         onOpenDetail = { onSelectCamera(camera) },
                         onEdit = { onEditCamera(camera) }
                     )
@@ -309,6 +334,7 @@ private fun CameraGridTile(
     camera: CameraConfig,
     isCompact: Boolean,
     onToggleLiveDashboard: (Boolean) -> Unit,
+    onToggleMotion: (Boolean) -> Unit,
     onOpenDetail: () -> Unit,
     onEdit: () -> Unit
 ) {
@@ -318,9 +344,9 @@ private fun CameraGridTile(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(14.dp))
+            .border(1.dp, FrColors.cardHigh, RoundedCornerShape(14.dp))
             .clickable { onOpenDetail() },
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+        colors = CardDefaults.cardColors(containerColor = FrColors.surface),
         shape = RoundedCornerShape(14.dp)
     ) {
         Column {
@@ -331,19 +357,26 @@ private fun CameraGridTile(
                     .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
                     .background(Color.Black)
             ) {
-                if (camera.liveInDashboard) {
+                // La vista previa y las alertas de movimiento son independientes:
+                // si hay vigilancia activa (alertas o grabación automática) el video sigue procesándose
+                // por detrás de una tarjeta opaca aunque la vista previa esté desactivada.
+                val monitoring = camera.motionDetectionEnabled || camera.autoRecordMode != "OFF"
+                if (camera.liveInDashboard || monitoring) {
                     UniversalCameraPlayer(
                         camera = camera,
                         useSubStream = useSubStreamInGrid,
                         isMuted = isMuted,
-                        enablePinchZoom = !isCompact,
-                        modifier = Modifier.fillMaxSize()
+                        enablePinchZoom = !isCompact && camera.liveInDashboard,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = if (camera.liveInDashboard) 1f else 0.02f }
                     )
-                } else {
+                }
+                if (!camera.liveInDashboard) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color(0xFF0F172A))
+                            .background(FrColors.surfaceAlt)
                             .clickable { onToggleLiveDashboard(true) },
                         contentAlignment = Alignment.Center
                     ) {
@@ -354,18 +387,18 @@ private fun CameraGridTile(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.PlayCircleOutline,
-                                contentDescription = "Activar movimiento",
+                                contentDescription = "Activar vista previa",
                                 tint = Color(0xFF38BDF8),
                                 modifier = Modifier.size(38.dp)
                             )
                             Text(
-                                text = "Movimiento pausado",
+                                text = if (camera.motionDetectionEnabled) "Vista previa desactivada" else "Vista previa pausada",
                                 color = Color(0xFFE2E8F0),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Toca para ver en vivo",
+                                text = if (monitoring) "Vigilando en segundo plano • toca para ver" else "Toca para ver en vivo",
                                 color = Color(0xFF94A3B8),
                                 fontSize = 10.sp
                             )
@@ -442,7 +475,13 @@ private fun CameraGridTile(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Switch de Movimiento en Pantalla Principal
+                    // Interruptor 1: vista previa en la pantalla principal
+                    Icon(
+                        imageVector = Icons.Default.Visibility,
+                        contentDescription = "Vista previa",
+                        tint = if (camera.liveInDashboard) Color(0xFF38BDF8) else Color(0xFF64748B),
+                        modifier = Modifier.size(14.dp)
+                    )
                     Switch(
                         checked = camera.liveInDashboard,
                         onCheckedChange = { onToggleLiveDashboard(it) },
@@ -454,6 +493,19 @@ private fun CameraGridTile(
                             uncheckedTrackColor = Color(0xFF334155)
                         )
                     )
+
+                    // Interruptor 2: notificaciones de movimiento (independiente de la vista previa)
+                    IconButton(
+                        onClick = { onToggleMotion(!camera.motionDetectionEnabled) },
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (camera.motionDetectionEnabled) Icons.Default.NotificationsActive else Icons.Default.NotificationsOff,
+                            contentDescription = if (camera.motionDetectionEnabled) "Desactivar notificaciones de movimiento" else "Activar notificaciones de movimiento",
+                            tint = if (camera.motionDetectionEnabled) Color(0xFFF59E0B) else Color(0xFF64748B),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
 
                     if (!isCompact) {
                         IconButton(

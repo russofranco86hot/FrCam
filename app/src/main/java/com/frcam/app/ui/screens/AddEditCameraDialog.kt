@@ -1,4 +1,8 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.frcam.app.ui.screens
+
+import com.frcam.app.ui.theme.FrColors
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -197,7 +201,7 @@ fun AddEditCameraSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF111827)
+        containerColor = FrColors.surface
     ) {
         Column(
             modifier = Modifier
@@ -266,16 +270,23 @@ fun AddEditCameraSheet(
                 fontWeight = FontWeight.SemiBold,
                 color = Color(0xFF38BDF8)
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // FlowRow: las opciones saltan de línea en vez de apretarse y dejar un hueco vacío debajo.
+            // Se quita el área táctil mínima de 48dp de los chips, que era la causa del espacio en blanco.
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.material3.LocalMinimumInteractiveComponentSize provides androidx.compose.ui.unit.Dp.Unspecified
             ) {
-                ConnectionMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = connectionMode == mode,
-                        onClick = { connectionMode = mode },
-                        label = { Text(mode.label, fontSize = 11.sp) }
-                    )
+                androidx.compose.foundation.layout.FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    ConnectionMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = connectionMode == mode,
+                            onClick = { connectionMode = mode },
+                            label = { Text(mode.label, fontSize = 11.sp) }
+                        )
+                    }
                 }
             }
 
@@ -283,7 +294,7 @@ fun AddEditCameraSheet(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 8.dp),
+                    .padding(top = 2.dp, bottom = 8.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF0C4A6E).copy(alpha = 0.45f)),
                 shape = RoundedCornerShape(12.dp)
             ) {
@@ -509,7 +520,7 @@ fun AddEditCameraSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF1E293B))
+                    .background(FrColors.cardHigh)
                     .padding(10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
@@ -722,7 +733,7 @@ fun RingCloudLoginDialog(
                 }
 
                 if (discoveredDevices.isNotEmpty()) {
-                    HorizontalDivider(color = Color(0xFF1E293B))
+                    HorizontalDivider(color = FrColors.cardHigh)
                     Text(
                         text = "Selecciona tus cámaras para importarlas. Dejar la IP vacía activará Ring Cloud Nativo directo sin puente.",
                         fontSize = 11.sp,
@@ -741,7 +752,7 @@ fun RingCloudLoginDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onImportDevice(dev, bridgeHost) },
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
                             shape = RoundedCornerShape(10.dp)
                         ) {
                             Row(
@@ -812,7 +823,7 @@ fun V380UnlockGuideDialog(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFF090D16), RoundedCornerShape(8.dp))
+                        .background(FrColors.background, RoundedCornerShape(8.dp))
                         .padding(10.dp)
                 ) {
                     Text(
@@ -907,7 +918,7 @@ fun LanDiscoveryDialog(
                     )
                 }
 
-                HorizontalDivider(color = Color(0xFF1E293B))
+                HorizontalDivider(color = FrColors.cardHigh)
 
                 if (discoveredDevices.isEmpty() && !isScanning) {
                     Box(
@@ -934,7 +945,7 @@ fun LanDiscoveryDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { onSelectDevice(dev) },
-                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Row(
@@ -1050,7 +1061,7 @@ fun MotionEventsHistoryDialog(
                                     onDismiss()
                                     onSelectCamera(event.cameraId)
                                 },
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
                             shape = RoundedCornerShape(10.dp)
                         ) {
                             Column(modifier = Modifier.padding(10.dp)) {

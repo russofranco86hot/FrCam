@@ -1,5 +1,7 @@
 package com.frcam.app.ui.player
 
+import com.frcam.app.ui.theme.FrColors
+
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -80,6 +82,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.frcam.app.media.CameraAudioPlayer
 import com.frcam.app.media.FrameMotionDetector
+import com.frcam.app.media.LiveMp4VideoRecorder
+import com.frcam.app.data.AppSettings
+import com.frcam.app.data.AutoRecordMode
+import kotlinx.coroutines.NonCancellable
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.ConnectionMode
 import com.frcam.app.model.StreamProtocol
@@ -186,10 +192,14 @@ fun UniversalCameraPlayer(
     val motionDetector = remember(camera.id) { FrameMotionDetector() }
     var lastMotionBannerTimeMs by remember(camera.id) { mutableLongStateOf(0L) }
     var motionActiveBanner by remember(camera.id) { mutableStateOf(false) }
+    var lastMotionAtMs by remember(camera.id) { mutableLongStateOf(0L) }
 
-    LaunchedEffect(camera.id, camera.motionDetectionEnabled) {
+    // La detección corre si hay alertas activadas O si la grabación automática depende del movimiento.
+    // Las notificaciones solo se envían cuando las alertas están activadas.
+    val needsMotionDetection = camera.motionDetectionEnabled || camera.autoRecordMode == AutoRecordMode.MOTION
+    LaunchedEffect(camera.id, camera.motionDetectionEnabled, camera.autoRecordMode) {
         motionDetector.reset()
-        if (!camera.motionDetectionEnabled) {
+        if (!needsMotionDetection) {
             motionActiveBanner = false
             return@LaunchedEffect
         }
@@ -202,11 +212,13 @@ fun UniversalCameraPlayer(
                         context = context,
                         cameraId = camera.id,
                         cameraName = camera.name,
-                        frameBitmap = frame
+                        frameBitmap = frame,
+                        notify = camera.motionDetectionEnabled
                     )
                 }
                 if (score >= 4.5f) {
                     lastMotionBannerTimeMs = System.currentTimeMillis()
+                    lastMotionAtMs = lastMotionBannerTimeMs
                     motionActiveBanner = true
                 }
             }
@@ -216,10 +228,47 @@ fun UniversalCameraPlayer(
         }
     }
 
+    // Grabación automática (al detectar movimiento o en franja horaria) a Galería: Movies/FrCam
+    val autoRecorder = remember(camera.id) { LiveMp4VideoRecorder(context, camera.name) }
+    LaunchedEffect(camera.id, camera.autoRecordMode) {
+        val mode = camera.autoRecordMode
+        if (mode != AutoRecordMode.MOTION && mode != AutoRecordMode.SCHEDULE) return@LaunchedEffect
+        var segmentStartMs = 0L
+        try {
+            while (isActive) {
+                val now = System.currentTimeMillis()
+                val wantRecording = when (mode) {
+                    AutoRecordMode.MOTION -> lastMotionAtMs > 0L &&
+                        now - lastMotionAtMs <= AppSettings.motionClipSeconds * 1000L
+                    else -> AppSettings.isInsideSchedule(now)
+                }
+                if (wantRecording && !autoRecorder.isRecording) {
+                    // Solo se arranca si ya hay video real en pantalla
+                    if (internalHandle.captureCurrentBitmap(320, 180) != null) {
+                        if (autoRecorder.startRecording(this, { internalHandle.captureCurrentBitmap(1280, 720) }, {})) {
+                            segmentStartMs = now
+                        }
+                    }
+                } else if (autoRecorder.isRecording) {
+                    val segmentExpired = mode == AutoRecordMode.SCHEDULE &&
+                        now - segmentStartMs >= AppSettings.scheduleSegmentMinutes * 60_000L
+                    if (!wantRecording || segmentExpired) {
+                        withContext(Dispatchers.IO) { autoRecorder.stopAndSaveToGallery() }
+                    }
+                }
+                delay(1000L)
+            }
+        } finally {
+            if (autoRecorder.isRecording) {
+                withContext(NonCancellable) { autoRecorder.stopAndSaveToGallery() }
+            }
+        }
+    }
+
     Box(
         modifier = modifier
             .clipToBounds()
-            .background(Color(0xFF070B14))
+            .background(FrColors.deepest)
             .then(
                 if (enablePinchZoom) {
                     Modifier.pointerInput(camera.id) {
@@ -765,9 +814,9 @@ private fun V380HardwareStreamSurface(
                     }
                 },
                 onAudioPacket = { audioBytes, packetType ->
-                    if (!isMuted) {
-                        audioPlayer.playAudioFrame(audioBytes, isAlaw = (packetType == 0x16.toByte() || packetType == 0x1A.toByte()))
-                    }
+                    // El estado mudo se aplica dentro de CameraAudioPlayer (setMuted) y se actualiza en vivo;
+                    // antes se capturaba el valor inicial de isMuted y el audio nunca se activaba.
+                    audioPlayer.playAudioFrame(audioBytes, isAlaw = (packetType == 0x16.toByte() || packetType == 0x1A.toByte()))
                 },
                 onError = { errMsg ->
                     streamState = StreamState.ERROR

@@ -313,7 +313,9 @@ data class CameraConfig(
     val staticGateway: String = "",
     val staticDns: String = "8.8.8.8",
     val recordingMode: String = "MOTION",
-    val liveInDashboard: Boolean = true
+    val liveInDashboard: Boolean = true,
+    /** Grabación automática: OFF, MOTION (al detectar movimiento) o SCHEDULE (franja horaria). */
+    val autoRecordMode: String = "OFF"
 ) {
     fun isV380NativeProtocol(): Boolean {
         if (protocol == StreamProtocol.V380_NATIVE) return true
