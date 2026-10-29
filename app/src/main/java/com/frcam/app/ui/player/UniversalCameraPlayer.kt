@@ -216,7 +216,7 @@ fun UniversalCameraPlayer(
                         notify = camera.motionDetectionEnabled
                     )
                 }
-                if (score >= 4.5f) {
+                if (score >= AppSettings.motionSensitivity.minAreaPercent) {
                     lastMotionBannerTimeMs = System.currentTimeMillis()
                     lastMotionAtMs = lastMotionBannerTimeMs
                     motionActiveBanner = true

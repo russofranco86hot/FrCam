@@ -42,6 +42,9 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material.icons.filled.OpenWith
@@ -114,6 +117,7 @@ fun CameraDashboardScreen(
 ) {
     val context = LocalContext.current
     var showBackupDialog by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -201,7 +205,10 @@ fun CameraDashboardScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Security,
                             contentDescription = null,
@@ -209,49 +216,25 @@ fun CameraDashboardScreen(
                             modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Column {
+                        Column(modifier = Modifier.weight(1f, fill = false)) {
                             Text(
                                 text = "FrCam Monitor Pro",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.ExtraBold
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
                                 text = "${cameras.size} cámara(s) • LAN: ${localPhoneIp ?: "Wi-Fi"}",
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 },
                 actions = {
-                    IconButton(onClick = onOpenMotionHistory) {
-                        Icon(
-                            imageVector = Icons.Default.NotificationsActive,
-                            contentDescription = "Alertas de Movimiento",
-                            tint = Color(0xFFF59E0B)
-                        )
-                    }
-                    IconButton(onClick = onOpenRingLogin) {
-                        Icon(
-                            imageVector = Icons.Default.CloudDone,
-                            contentDescription = "Conectar Cuenta Ring",
-                            tint = Color(0xFF34D399)
-                        )
-                    }
-                    IconButton(onClick = onOpenScanner) {
-                        Icon(
-                            imageVector = Icons.Default.Radar,
-                            contentDescription = "Escanear Red Wi-Fi",
-                            tint = Color(0xFF38BDF8)
-                        )
-                    }
-                    IconButton(onClick = { showBackupDialog = true }) {
-                        Icon(
-                            imageVector = Icons.Default.SettingsBackupRestore,
-                            contentDescription = "Copia de Seguridad y Restauración",
-                            tint = Color(0xFF38BDF8)
-                        )
-                    }
                     IconButton(onClick = onOpenGallery) {
                         Icon(
                             imageVector = Icons.Default.PhotoLibrary,
@@ -259,11 +242,11 @@ fun CameraDashboardScreen(
                             tint = Color(0xFFA78BFA)
                         )
                     }
-                    IconButton(onClick = onOpenSettings) {
+                    IconButton(onClick = onOpenMotionHistory) {
                         Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Ajustes",
-                            tint = Color(0xFFCBD5E1)
+                            imageVector = Icons.Default.NotificationsActive,
+                            contentDescription = "Alertas de Movimiento",
+                            tint = Color(0xFFF59E0B)
                         )
                     }
                     IconButton(onClick = onToggleGridMode) {
@@ -275,6 +258,76 @@ fun CameraDashboardScreen(
                             },
                             contentDescription = "Cambiar Cuadrícula (${gridMode.label})"
                         )
+                    }
+                    Box {
+                        IconButton(onClick = { showMenu = true }) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "Más opciones",
+                                tint = Color(0xFFCBD5E1)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Ajustes Generales") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Settings,
+                                        contentDescription = null,
+                                        tint = Color(0xFF38BDF8)
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onOpenSettings()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Escanear Red Wi-Fi") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Radar,
+                                        contentDescription = null,
+                                        tint = Color(0xFF38BDF8)
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onOpenScanner()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Conectar Cuenta Ring") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudDone,
+                                        contentDescription = null,
+                                        tint = Color(0xFF34D399)
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onOpenRingLogin()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Copia de Seguridad y Restauración") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.SettingsBackupRestore,
+                                        contentDescription = null,
+                                        tint = Color(0xFF38BDF8)
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    showBackupDialog = true
+                                }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

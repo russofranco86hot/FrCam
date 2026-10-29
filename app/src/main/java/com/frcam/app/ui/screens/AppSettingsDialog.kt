@@ -1,6 +1,7 @@
 package com.frcam.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -18,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.frcam.app.BuildConfig
 import com.frcam.app.data.AppSettings
+import com.frcam.app.data.MotionSensitivity
 import com.frcam.app.ui.theme.FrColors
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -30,6 +32,9 @@ fun AppSettingsDialog(
     var startMinutes by remember { mutableIntStateOf(AppSettings.scheduleStartMinutes) }
     var endMinutes by remember { mutableIntStateOf(AppSettings.scheduleEndMinutes) }
     var segmentMinutes by remember { mutableIntStateOf(AppSettings.scheduleSegmentMinutes) }
+    var sensitivity by remember { mutableStateOf(AppSettings.motionSensitivity) }
+    var aiEnabled by remember { mutableStateOf(AppSettings.aiDetectionEnabled) }
+    var aiFilterSmart by remember { mutableStateOf(AppSettings.aiFilterOnlySmart) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -90,6 +95,154 @@ fun AppSettingsDialog(
                                     AppSettings.updateAmoled(it)
                                 }
                             )
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // SECCIÓN SENSIBILIDAD Y DETECCIÓN INTELIGENTE
+                Text(
+                    text = "Sensibilidad de Movimiento (Anti-Hojas)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = Color(0xFF38BDF8)
+                )
+
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = FrColors.card),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Nivel de sensibilidad del detector:",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp
+                        )
+                        Text(
+                            text = "Si tienes cámaras en el patio o jardín donde el viento agita ramas y hojas de árboles, elige 'Baja'.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            MotionSensitivity.entries.forEach { opt ->
+                                val isSelected = sensitivity == opt
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            sensitivity = opt
+                                            AppSettings.updateMotionSensitivity(opt)
+                                        },
+                                    color = if (isSelected) Color(0xFF0369A1).copy(alpha = 0.25f) else Color.Transparent,
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        width = 1.dp,
+                                        color = if (isSelected) Color(0xFF38BDF8) else Color(0xFF334155)
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        RadioButton(
+                                            selected = isSelected,
+                                            onClick = {
+                                                sensitivity = opt
+                                                AppSettings.updateMotionSensitivity(opt)
+                                            }
+                                        )
+                                        Column {
+                                            Text(
+                                                text = opt.title,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp,
+                                                color = if (isSelected) Color(0xFF38BDF8) else Color.White
+                                            )
+                                            Text(
+                                                text = opt.description,
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // SECCIÓN INTELIGENCIA ARTIFICIAL
+                Text(
+                    text = "Inteligencia Artificial (IA On-Device)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = Color(0xFF38BDF8)
+                )
+
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = FrColors.card),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    text = "Reconocimiento IA (Personas, Perros, Autos)",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "Analiza los cuadros con IA en el teléfono para identificar personas (🚶), mascotas (🐕) o vehículos (🚗) y detallarlo en la notificación.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = aiEnabled,
+                                onCheckedChange = {
+                                    aiEnabled = it
+                                    AppSettings.updateAiDetectionEnabled(it)
+                                }
+                            )
+                        }
+
+                        if (aiEnabled) {
+                            HorizontalDivider(color = Color(0xFF334155))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(
+                                        text = "Filtrar solo con IA (Anti-falsas alarmas)",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp,
+                                        color = Color(0xFF34D399)
+                                    )
+                                    Text(
+                                        text = "Solo notifica si la IA confirma una persona, mascota o vehículo. Silencia completamente hojas agitadas por el viento o sombras.",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = aiFilterSmart,
+                                    onCheckedChange = {
+                                        aiFilterSmart = it
+                                        AppSettings.updateAiFilterOnlySmart(it)
+                                    }
+                                )
+                            }
                         }
                     }
                 }

@@ -1070,12 +1070,25 @@ fun MotionEventsHistoryDialog(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(
-                                        text = event.cameraName,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.sp,
-                                        color = Color.White
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = event.cameraName,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            color = Color.White
+                                        )
+                                        if (event.aiLabel != null) {
+                                            Text(
+                                                text = event.aiLabel,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 11.sp,
+                                                color = Color(0xFF34D399)
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = event.formattedTime,
                                         fontSize = 11.sp,
@@ -1105,7 +1118,7 @@ fun MotionEventsHistoryDialog(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "Diferencia de movimiento: ${"%.1f".format(event.motionScorePercent * 100)}% • Toca para abrir cámara",
+                                    text = "${event.aiLabel?.let { "$it • " } ?: ""}${"%.1f".format(event.motionScorePercent)}% actividad • Toca para abrir cámara",
                                     fontSize = 10.sp,
                                     color = Color(0xFF94A3B8)
                                 )

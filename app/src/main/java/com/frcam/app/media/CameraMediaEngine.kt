@@ -41,6 +41,11 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.random.Random
+import com.frcam.app.data.AppSettings
+import com.frcam.app.data.MotionSensitivity
+import com.frcam.app.ai.CameraAiDetector
+import com.frcam.app.ai.AiDetection
+import com.frcam.app.ai.AiCategory
 
 data class MotionEventRecord(
     val id: String,
@@ -51,7 +56,8 @@ data class MotionEventRecord(
     val motionScorePercent: Float,
     val snapshot: Bitmap,
     val gifFile: File? = null,
-    val animationFrames: List<Bitmap> = emptyList()
+    val animationFrames: List<Bitmap> = emptyList(),
+    val aiLabel: String? = null
 )
 
 object CameraMediaEngine {
@@ -108,7 +114,8 @@ object CameraMediaEngine {
         cameraName: String,
         motionPercent: Float,
         rawBitmap: Bitmap,
-        burstFrames: List<Bitmap> = emptyList()
+        burstFrames: List<Bitmap> = emptyList(),
+        aiDetection: AiDetection? = null
     ) {
         ensureNotificationChannel(context)
 
@@ -124,6 +131,9 @@ object CameraMediaEngine {
 
         val gifFile = createMotionGif(context, cameraId, framesForGif)
 
+        val hasSmartAi = aiDetection != null && aiDetection.category != AiCategory.GENERAL
+        val aiBadge = if (hasSmartAi && aiDetection != null) aiDetection.displayBadge else null
+
         val event = MotionEventRecord(
             id = "${cameraId}_${System.currentTimeMillis()}",
             cameraId = cameraId,
@@ -133,7 +143,8 @@ object CameraMediaEngine {
             motionScorePercent = motionPercent,
             snapshot = stampedBitmap,
             gifFile = gifFile,
-            animationFrames = framesForGif
+            animationFrames = framesForGif,
+            aiLabel = aiBadge
         )
         _motionEvents.value = (listOf(event) + _motionEvents.value).take(30)
 
@@ -158,10 +169,23 @@ object CameraMediaEngine {
 
         val savedGifUri = gifFile?.let { saveGifToGallery(context, cameraName, it) }
 
+        val notifTitle = when {
+            aiDetection?.category == AiCategory.PERSON -> "🚶 ¡Persona detectada! — $cameraName"
+            aiDetection?.category == AiCategory.PET -> "${aiDetection.emoji} ¡${aiDetection.label} detectada! — $cameraName"
+            aiDetection?.category == AiCategory.VEHICLE -> "${aiDetection.emoji} ¡${aiDetection.label} detectado! — $cameraName"
+            hasSmartAi && aiDetection != null -> "${aiDetection.emoji} ${aiDetection.label} — $cameraName"
+            else -> "🚨 Movimiento detectado: $cameraName"
+        }
+
+        val notifText = when {
+            hasSmartAi && aiDetection != null -> "${aiDetection.emoji} ${aiDetection.label} (${"%.0f".format(aiDetection.confidence * 100)}% certeza) • $timeStr • Clip animado"
+            else -> "A las $timeStr (${"%.1f".format(motionPercent)}% actividad) • Clip animado"
+        }
+
         val builder = NotificationCompat.Builder(context, MOTION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle("🚨 Movimiento detectado: $cameraName")
-            .setContentText("A las $timeStr (${"%.1f".format(motionPercent)}% actividad) • Clip animado")
+            .setContentTitle(notifTitle)
+            .setContentText(notifText)
             .setLargeIcon(stampedBitmap)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
@@ -174,10 +198,12 @@ object CameraMediaEngine {
             val picks = pickEvenly(framesForGif, 6)
             if (picks.isNotEmpty()) {
                 val big = android.widget.RemoteViews(context.packageName, com.frcam.app.R.layout.notification_motion_big)
-                big.setTextViewText(
-                    com.frcam.app.R.id.motion_title,
+                val expandedTitle = if (hasSmartAi && aiDetection != null) {
+                    "$cameraName • ${aiDetection.emoji} ${aiDetection.label} (${"%.0f".format(aiDetection.confidence * 100)}%) • $timeStr"
+                } else {
                     "$cameraName • $timeStr • ${"%.1f".format(motionPercent)}% actividad"
-                )
+                }
+                big.setTextViewText(com.frcam.app.R.id.motion_title, expandedTitle)
                 val ids = intArrayOf(
                     com.frcam.app.R.id.motion_f0, com.frcam.app.R.id.motion_f1, com.frcam.app.R.id.motion_f2,
                     com.frcam.app.R.id.motion_f3, com.frcam.app.R.id.motion_f4, com.frcam.app.R.id.motion_f5
@@ -396,26 +422,26 @@ object CameraMediaEngine {
 
 /**
  * Per-camera real-time frame motion detector.
- * Downscales frames to a 64x36 luminance grid and triggers Ring-style notifications on motion.
+ * Downscales frames to a 64x36 luminance grid, applies anti-leaf cluster filtering,
+ * supports configurable sensitivity and triggers Google ML Kit on-device AI classification.
  */
 class FrameMotionDetector(
     private val gridW: Int = 64,
     private val gridH: Int = 36,
-    private val pixelDeltaThreshold: Int = 24,
-    private val motionAreaThresholdPercent: Float = 4.5f,
-    private val cooldownMs: Long = 12_000L
+    private val cooldownMs: Long = 10_000L
 ) {
     private var previousLuma: IntArray? = null
     private var warmupFramesRemaining = 3
     private var lastTriggerTimeMs = 0L
     private val rollingFrames = mutableListOf<Bitmap>()
 
-    fun inspectFrame(
+    suspend fun inspectFrame(
         context: Context,
         cameraId: String,
         cameraName: String,
         frameBitmap: Bitmap,
-        notify: Boolean = true
+        notify: Boolean = true,
+        sensitivity: MotionSensitivity = AppSettings.motionSensitivity
     ): Float {
         return try {
             val copyForBuffer = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
@@ -448,28 +474,74 @@ class FrameMotionDetector(
             previousLuma = currentLuma
             if (prev == null) return 0f
 
+            var minX = gridW
+            var maxX = -1
+            var minY = gridH
+            var maxY = -1
             var changedCells = 0
-            for (i in currentLuma.indices) {
-                if (abs(currentLuma[i] - prev[i]) >= pixelDeltaThreshold) {
-                    changedCells++
+
+            for (y in 0 until gridH) {
+                val rowOffset = y * gridW
+                for (x in 0 until gridW) {
+                    val idx = rowOffset + x
+                    if (abs(currentLuma[idx] - prev[idx]) >= sensitivity.pixelDelta) {
+                        changedCells++
+                        if (x < minX) minX = x
+                        if (x > maxX) maxX = x
+                        if (y < minY) minY = y
+                        if (y > maxY) maxY = y
+                    }
                 }
             }
 
             val percent = (changedCells * 100f) / (gridW * gridH).toFloat()
             val now = System.currentTimeMillis()
 
-            if (notify && percent >= motionAreaThresholdPercent && (now - lastTriggerTimeMs) >= cooldownMs) {
-                lastTriggerTimeMs = now
+            // Filtro anti-hojas/viento: evaluar compacidad del área de cambio
+            var isClustered = true
+            if (changedCells > 0 && maxX >= minX && maxY >= minY) {
+                val bboxW = maxX - minX + 1
+                val bboxH = maxY - minY + 1
+                val bboxArea = bboxW * bboxH
+                val compactness = changedCells.toFloat() / bboxArea.toFloat()
+                val bboxScreenPercent = (bboxArea * 100f) / (gridW * gridH).toFloat()
+
+                // Si el cambio cubre más de 35% de la pantalla pero la compacidad es ínfima,
+                // son ramas/hojas agitándose con el viento de forma dispersa.
+                if (bboxScreenPercent > 35f && compactness < sensitivity.clusterRatioMin) {
+                    isClustered = false
+                }
+            }
+
+            val meetsThreshold = percent >= sensitivity.minAreaPercent && isClustered
+
+            if (notify && meetsThreshold && (now - lastTriggerTimeMs) >= cooldownMs) {
                 val copyForAlert = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
                 val burst = rollingFrames.map { it.copy(Bitmap.Config.ARGB_8888, false) }
-                CameraMediaEngine.notifyMotionDetected(
-                    context = context,
-                    cameraId = cameraId,
-                    cameraName = cameraName,
-                    motionPercent = percent,
-                    rawBitmap = copyForAlert,
-                    burstFrames = burst
-                )
+
+                // Análisis IA inteligente si está habilitado
+                val aiResult = if (AppSettings.aiDetectionEnabled) {
+                    CameraAiDetector.analyzeFrame(frameBitmap)
+                } else null
+
+                // Filtro estricto IA: si el usuario configuró "Filtrar solo con IA", ignorar
+                // movimientos que no sean Persona, Mascota o Vehículo (o si la IA detectó solo vegetación)
+                val shouldSuppress = if (AppSettings.aiDetectionEnabled && AppSettings.aiFilterOnlySmart) {
+                    aiResult == null || !aiResult.isSmartTarget || aiResult.category == AiCategory.NATURE
+                } else false
+
+                if (!shouldSuppress) {
+                    lastTriggerTimeMs = now
+                    CameraMediaEngine.notifyMotionDetected(
+                        context = context,
+                        cameraId = cameraId,
+                        cameraName = cameraName,
+                        motionPercent = percent,
+                        rawBitmap = copyForAlert,
+                        burstFrames = burst,
+                        aiDetection = aiResult
+                    )
+                }
             }
             percent
         } catch (_: Exception) {
