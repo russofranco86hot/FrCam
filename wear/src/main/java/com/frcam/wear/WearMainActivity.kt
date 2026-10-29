@@ -1,5 +1,9 @@
 package com.frcam.wear
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -27,12 +31,22 @@ import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URL
 
 enum class WearDisplayMode {
     GRID,      // "Juntas" (Cuadrícula / Mosaico)
@@ -53,8 +67,10 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
 
         WearCameraStorage.init(this)
 
-        // Sincronizar inmediatamente al abrir
-        requestSyncFromPhone()
+        // Sincronizar inmediatamente al abrir si no hay cámaras
+        if (WearCameraStorage.cameras.value.isEmpty()) {
+            requestSyncFromPhone(isManualTap = false)
+        }
 
         setContent {
             val cameras by WearCameraStorage.cameras.collectAsState()
@@ -120,10 +136,11 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                 val json = String(messageEvent.data, Charsets.UTF_8)
                 if (json.isNotBlank()) {
                     Log.d(TAG, "Cámaras recibidas en primer plano via MessageClient!")
-                    WearCameraStorage.saveJsonString(this, json)
-                    runOnUiThread {
-                        val count = WearCameraStorage.cameras.value.size
-                        Toast.makeText(this, "¡$count cámaras sincronizadas!", Toast.LENGTH_SHORT).show()
+                    val count = WearCameraStorage.saveJsonString(this, json)
+                    if (count > 0) {
+                        runOnUiThread {
+                            Toast.makeText(this, "¡$count cámaras sincronizadas!", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -140,10 +157,11 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                     val json = dataMap.getString("cameras_json")
                     if (!json.isNullOrBlank()) {
                         Log.d(TAG, "Cámaras recibidas en primer plano via DataClient!")
-                        WearCameraStorage.saveJsonString(this, json)
-                        runOnUiThread {
-                            val count = WearCameraStorage.cameras.value.size
-                            Toast.makeText(this, "¡$count cámaras actualizadas!", Toast.LENGTH_SHORT).show()
+                        val count = WearCameraStorage.saveJsonString(this, json)
+                        if (count > 0) {
+                            runOnUiThread {
+                                Toast.makeText(this, "¡$count cámaras actualizadas!", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -155,9 +173,13 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
 
     private fun requestSyncFromPhone(isManualTap: Boolean = false) {
         lifecycleScope.launch(Dispatchers.IO) {
-            var syncedCount = 0
+            if (isManualTap) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@WearMainActivity, "Solicitando cámaras al celular...", Toast.LENGTH_SHORT).show()
+                }
+            }
 
-            // 1. Canal Primario Inmediato: Consultar la caché de DataClient en el reloj
+            // 1. Canal Primario: Consultar la caché de DataClient en el reloj
             try {
                 val dataItems = Wearable.getDataClient(this@WearMainActivity).dataItems.await()
                 for (item in dataItems) {
@@ -165,10 +187,13 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                         val dataMap = DataMapItem.fromDataItem(item).dataMap
                         val json = dataMap.getString("cameras_json")
                         if (!json.isNullOrBlank()) {
-                            Log.d(TAG, "Cámaras leídas inmediatamente de DataClient local!")
-                            WearCameraStorage.saveJsonString(this@WearMainActivity, json)
-                            syncedCount = WearCameraStorage.cameras.value.size
-                            if (syncedCount > 0) break
+                            val count = WearCameraStorage.saveJsonString(this@WearMainActivity, json)
+                            if (count > 0) {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(this@WearMainActivity, "¡$count cámaras sincronizadas!", Toast.LENGTH_SHORT).show()
+                                }
+                                return@launch
+                            }
                         }
                     }
                 }
@@ -176,61 +201,148 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                 Log.w(TAG, "DataClient query error: ${e.message}")
             }
 
-            if (syncedCount > 0) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@WearMainActivity, "¡$syncedCount cámaras sincronizadas!", Toast.LENGTH_SHORT).show()
-                }
-                return@launch
-            }
-
-            // 2. Canal Bluetooth / Cloud: Enviar solicitud al celular via MessageClient
-            var nodeCount = 0
+            // 2. Canal Bluetooth: Enviar solicitud de sincronización a todos los nodos conectados
             try {
                 val nodes = Wearable.getNodeClient(this@WearMainActivity).connectedNodes.await()
-                nodeCount = nodes.size
                 val messageClient = Wearable.getMessageClient(this@WearMainActivity)
                 for (node in nodes) {
-                    messageClient.sendMessage(node.id, REQUEST_SYNC_PATH, byteArrayOf()).await()
-                    Log.d(TAG, "Solicitud enviada al celular: ${node.displayName} (${node.id})")
+                    try {
+                        messageClient.sendMessage(node.id, REQUEST_SYNC_PATH, byteArrayOf()).await()
+                        Log.d(TAG, "Solicitud enviada al celular: ${node.displayName} (${node.id})")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error enviando a nodo ${node.id}: ${e.message}")
+                    }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Error solicitando nodos Bluetooth: ${e.message}")
+                Log.w(TAG, "Error consultando nodos Bluetooth: ${e.message}")
             }
 
-            // 3. Canal Wi-Fi Local (UDP broadcast en puerto 49880)
-            try {
-                DatagramSocket().use { udpSocket ->
-                    udpSocket.broadcast = true
-                    udpSocket.soTimeout = 2000
-                    val sendData = "FRCAM_WEAR_REQUEST_SYNC".toByteArray(Charsets.UTF_8)
-                    val broadcastAddr = InetAddress.getByName("255.255.255.255")
-                    udpSocket.send(DatagramPacket(sendData, sendData.size, broadcastAddr, LAN_SYNC_PORT))
+            // 3. Canal Wi-Fi Local Directo (HTTP + UDP Probe en puerto 49880)
+            launch(Dispatchers.IO) {
+                tryFetchCamerasViaLocalWifi()
+            }
 
-                    val recvBuf = ByteArray(32768)
-                    val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
-                    udpSocket.receive(recvPacket)
-                    val text = String(recvPacket.data, 0, recvPacket.length, Charsets.UTF_8)
-                    if (text.startsWith("FRCAM_CAMERAS_JSON:")) {
-                        val camerasJson = text.removePrefix("FRCAM_CAMERAS_JSON:")
-                        WearCameraStorage.saveJsonString(this@WearMainActivity, camerasJson)
-                        syncedCount = WearCameraStorage.cameras.value.size
-                        Log.d(TAG, "Sincronizado vía Wi-Fi local directo! $syncedCount cámaras")
-                    }
-                }
-            } catch (_: Exception) {}
-
-            withContext(Dispatchers.Main) {
+            // 4. Esperar hasta 2.5 segundos de forma reactiva a que se reciban las cámaras
+            for (step in 1..8) {
+                delay(300L)
                 val current = WearCameraStorage.cameras.value.size
                 if (current > 0) {
-                    Toast.makeText(this@WearMainActivity, "¡$current cámaras sincronizadas con éxito!", Toast.LENGTH_SHORT).show()
-                } else if (isManualTap) {
-                    if (nodeCount > 0) {
-                        Toast.makeText(this@WearMainActivity, "Pidiendo cámaras al celular ($nodeCount conectado)...", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(this@WearMainActivity, "Buscando celular... Asegúrate de que FrCam esté abierto en tu teléfono.", Toast.LENGTH_LONG).show()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@WearMainActivity, "¡$current cámaras sincronizadas con éxito!", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+            }
+
+            // Si tras 2.5s no se recibieron cámaras y fue toque manual:
+            if (isManualTap && WearCameraStorage.cameras.value.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@WearMainActivity,
+                        "Esperando celular... En tu teléfono abre FrCam y toca 'Sincronizar cámaras con reloj' en Ajustes.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    /**
+     * Intenta sincronizar las cámaras directamente a través de la red Wi-Fi local
+     * conectando al servidor HTTP local del celular en el puerto 49880.
+     */
+    private suspend fun tryFetchCamerasViaLocalWifi() = withContext(Dispatchers.IO) {
+        // A. Intentar descubrimiento UDP rápido
+        var phoneIp: String? = null
+        try {
+            DatagramSocket().use { socket ->
+                socket.broadcast = true
+                socket.soTimeout = 1200
+                val sendData = "FRCAM_WEAR_REQUEST_SYNC".toByteArray(Charsets.UTF_8)
+                val broadcastAddr = InetAddress.getByName("255.255.255.255")
+                socket.send(DatagramPacket(sendData, sendData.size, broadcastAddr, LAN_SYNC_PORT))
+
+                val recvBuf = ByteArray(256)
+                val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
+                socket.receive(recvPacket)
+                val reply = String(recvPacket.data, 0, recvPacket.length, Charsets.UTF_8)
+                if (reply.startsWith("FRCAM_SERVER_HTTP")) {
+                    phoneIp = recvPacket.address.hostAddress
+                    Log.d(TAG, "Celular encontrado via UDP en IP: $phoneIp")
+                }
+            }
+        } catch (_: Exception) {}
+
+        // B. Si se descubrió la IP por UDP, descargar por HTTP
+        if (!phoneIp.isNullOrBlank()) {
+            if (downloadAndApplyCamerasFromHttp(phoneIp!!)) return@withContext
+        }
+
+        // C. Si no respondió UDP pero el reloj está en Wi-Fi, escanear la subred local rápidamente
+        val localSubnet = getLocalSubnetPrefix() ?: return@withContext
+        val candidateIps = (1..254).map { "$localSubnet.$it" }
+
+        coroutineScope {
+            val jobs = candidateIps.map { ip ->
+                async(Dispatchers.IO) {
+                    try {
+                        Socket().use { s ->
+                            s.connect(InetSocketAddress(ip, LAN_SYNC_PORT), 450)
+                            Log.d(TAG, "Puerto 49880 abierto en $ip, descargando cámaras...")
+                            downloadAndApplyCamerasFromHttp(ip)
+                        }
+                    } catch (_: Exception) {
+                        false
                     }
                 }
             }
+            jobs.awaitAll()
+        }
+    }
+
+    private fun downloadAndApplyCamerasFromHttp(hostIp: String): Boolean {
+        return try {
+            val url = URL("http://$hostIp:$LAN_SYNC_PORT/cameras")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 1500
+                readTimeout = 2000
+                requestMethod = "GET"
+            }
+            if (conn.responseCode in 200..299) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                if (json.isNotBlank()) {
+                    val count = WearCameraStorage.saveJsonString(this@WearMainActivity, json)
+                    if (count > 0) {
+                        Log.d(TAG, "¡$count cámaras sincronizadas exitosamente por HTTP Wi-Fi desde $hostIp!")
+                        runOnUiThread {
+                            Toast.makeText(this@WearMainActivity, "¡$count cámaras sincronizadas por Wi-Fi!", Toast.LENGTH_SHORT).show()
+                        }
+                        return true
+                    }
+                }
+            }
+            conn.disconnect()
+            false
+        } catch (e: Exception) {
+            Log.w(TAG, "Error descargando cámaras HTTP desde $hostIp: ${e.message}")
+            false
+        }
+    }
+
+    private fun getLocalSubnetPrefix(): String? {
+        return try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return null
+            val dhcp = wifiManager.dhcpInfo ?: return null
+            if (dhcp.gateway != 0) {
+                val g = dhcp.gateway
+                val ip = "${g and 0xFF}.${(g shr 8) and 0xFF}.${(g shr 16) and 0xFF}.${(g shr 24) and 0xFF}"
+                ip.substringBeforeLast(".")
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 }

@@ -22,12 +22,13 @@ class PhoneWearSyncService : WearableListenerService() {
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
         if (messageEvent.path == REQUEST_SYNC_PATH) {
-            Log.d(TAG, "Solicitud de cámaras recibida en el celular desde nodo: ${messageEvent.sourceNodeId}")
+            val sourceId = messageEvent.sourceNodeId
+            Log.d(TAG, "Solicitud de cámaras recibida en el celular desde nodo: $sourceId")
             CoroutineScope(Dispatchers.IO).launch {
                 try {
                     val repo = CameraRepository(applicationContext)
                     val cameras = repo.camerasFlow.first()
-                    PhoneWearSyncEngine.syncCamerasToWatch(applicationContext, cameras)
+                    PhoneWearSyncEngine.syncCamerasToWatch(applicationContext, cameras, targetNodeId = sourceId)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error procesando solicitud de sincronización en celular", e)
                 }

@@ -1,7 +1,10 @@
 package com.frcam.app.wear
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import com.frcam.app.model.CameraConfig
 import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.PutDataMapRequest
@@ -12,17 +15,20 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.ServerSocket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Motor de sincronización del celular hacia el reloj inteligente (Wear OS).
  * Transmite automáticamente la lista completa de cámaras configuradas mediante:
  * 1. Google Play Services Wearable Data Layer (DataClient persistente + MessageClient inmediato).
- * 2. Difusión directa local por Wi-Fi / UDP (puerto 49880) como canal ultra-rápido cuando
- *    celular y reloj están en la misma red Wi-Fi o Bluetooth tiene demoras de emparejamiento.
+ * 2. Servidor HTTP local embebido en el puerto 49880 para entrega ultra-rápida por Wi-Fi.
+ * 3. Difusión UDP de detección automática en red local.
  */
 object PhoneWearSyncEngine {
 
@@ -37,57 +43,100 @@ object PhoneWearSyncEngine {
     }
 
     private val isLanServerRunning = AtomicBoolean(false)
-    private var lastCamerasJson: String = "[]"
+    @Volatile
+    private var cachedCameras: List<CameraConfig> = emptyList()
 
     /**
-     * Inicia un listener UDP local para responder a solicitudes del reloj por la red local Wi-Fi.
+     * Inicia los servidores locales (HTTP + UDP) en el celular para sincronización directa por Wi-Fi.
      */
     fun startLanSyncServer(context: Context, getCameras: () -> List<CameraConfig>) {
         if (isLanServerRunning.getAndSet(true)) return
 
+        // 1. Servidor HTTP local (puerto 49880) para entrega confiable de JSON completo
         CoroutineScope(Dispatchers.IO).launch {
+            var serverSocket: ServerSocket? = null
             try {
-                DatagramSocket(LAN_SYNC_PORT).use { socket ->
-                    socket.broadcast = true
-                    val buffer = ByteArray(2048)
-                    Log.d(TAG, "Servidor UDP de sincronización con reloj iniciado en puerto $LAN_SYNC_PORT")
+                serverSocket = ServerSocket(LAN_SYNC_PORT)
+                Log.d(TAG, "Servidor HTTP local de FrCam iniciado en puerto $LAN_SYNC_PORT")
 
-                    while (true) {
-                        val packet = DatagramPacket(buffer, buffer.size)
-                        socket.receive(packet)
-                        val text = String(packet.data, 0, packet.length, Charsets.UTF_8).trim()
+                while (true) {
+                    val client = serverSocket.accept()
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            val reader = BufferedReader(InputStreamReader(client.getInputStream()))
+                            val firstLine = reader.readLine() ?: ""
+                            Log.d(TAG, "Petición HTTP recibida desde ${client.inetAddress.hostAddress}: $firstLine")
 
-                        if (text == "FRCAM_WEAR_REQUEST_SYNC") {
-                            Log.d(TAG, "Solicitud de sincronización Wi-Fi recibida desde ${packet.address.hostAddress}")
-                            val cameras = getCameras()
-                            val camerasJson = json.encodeToString(cameras)
-                            lastCamerasJson = camerasJson
-                            val bytes = ("FRCAM_CAMERAS_JSON:" + camerasJson).toByteArray(Charsets.UTF_8)
-                            val replyPacket = DatagramPacket(bytes, bytes.size, packet.address, packet.port)
-                            socket.send(replyPacket)
-                            Log.d(TAG, "Respuesta Wi-Fi enviada a ${packet.address.hostAddress} (${cameras.size} cámaras)")
+                            val cams = cachedCameras.ifEmpty { getCameras() }
+                            val body = json.encodeToString(cams).toByteArray(Charsets.UTF_8)
+
+                            val out = client.getOutputStream()
+                            val header = "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json; charset=utf-8\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            out.write(header.toByteArray(Charsets.UTF_8))
+                            out.write(body)
+                            out.flush()
+                            client.close()
+                            Log.d(TAG, "Entregadas ${cams.size} cámaras por HTTP a ${client.inetAddress.hostAddress}")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error en cliente HTTP: ${e.message}")
+                            try { client.close() } catch (_: Exception) {}
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Servidor UDP local detenido: ${e.message}")
+                Log.w(TAG, "Servidor HTTP local detenido: ${e.message}")
             } finally {
+                try { serverSocket?.close() } catch (_: Exception) {}
                 isLanServerRunning.set(false)
             }
+        }
+
+        // 2. Servidor UDP Responder para descubrimiento en Wi-Fi
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                DatagramSocket(LAN_SYNC_PORT).use { udpSocket ->
+                    udpSocket.broadcast = true
+                    val buffer = ByteArray(1024)
+                    while (true) {
+                        val packet = DatagramPacket(buffer, buffer.size)
+                        udpSocket.receive(packet)
+                        val text = String(packet.data, 0, packet.length, Charsets.UTF_8).trim()
+
+                        if (text == "FRCAM_WEAR_REQUEST_SYNC") {
+                            Log.d(TAG, "Probe UDP recibido desde reloj ${packet.address.hostAddress}")
+                            val replyData = "FRCAM_SERVER_HTTP:$LAN_SYNC_PORT".toByteArray(Charsets.UTF_8)
+                            val replyPacket = DatagramPacket(replyData, replyData.size, packet.address, packet.port)
+                            udpSocket.send(replyPacket)
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
     /**
      * Envía la lista completa de cámaras al reloj por todos los canales disponibles.
      */
-    fun syncCamerasToWatch(context: Context, cameras: List<CameraConfig>) {
+    fun syncCamerasToWatch(context: Context, cameras: List<CameraConfig>, targetNodeId: String? = null) {
+        if (cameras.isNotEmpty()) {
+            cachedCameras = cameras
+        }
+
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val camerasJson = json.encodeToString(cameras)
-                lastCamerasJson = camerasJson
+                val camsToSend = if (cameras.isNotEmpty()) cameras else cachedCameras
+                if (camsToSend.isEmpty()) {
+                    Log.w(TAG, "No hay cámaras para sincronizar")
+                    return@launch
+                }
+
+                val camerasJson = json.encodeToString(camsToSend)
                 val bytes = camerasJson.toByteArray(Charsets.UTF_8)
 
-                // 1. DataClient urgente (almacenamiento persistente en la capa Wearable de Google)
+                // 1. DataClient urgente (almacenamiento persistente en Google Play Services Wearable)
                 try {
                     val dataMap = PutDataMapRequest.create(CAMERAS_PATH).apply {
                         dataMap.putString("cameras_json", camerasJson)
@@ -95,35 +144,48 @@ object PhoneWearSyncEngine {
                     }
                     val putReq = dataMap.asPutDataRequest().setUrgent()
                     Wearable.getDataClient(context).putDataItem(putReq).await()
-                    Log.d(TAG, "Cámaras enviadas via DataClient urgente: ${cameras.size}")
+                    Log.d(TAG, "Cámaras enviadas via DataClient urgente: ${camsToSend.size}")
                 } catch (e: Exception) {
                     Log.w(TAG, "Error enviando DataClient: ${e.message}")
                 }
 
-                // 2. MessageClient (entrega inmediata a todos los relojes conectados por Bluetooth/Cloud)
+                // 2. MessageClient directo a nodo específico si se conoce
+                val messageClient = Wearable.getMessageClient(context)
+                if (!targetNodeId.isNullOrBlank()) {
+                    try {
+                        messageClient.sendMessage(targetNodeId, CAMERAS_PATH, bytes).await()
+                        Log.d(TAG, "Mensaje enviado DIRECTAMENTE al reloj (nodo: $targetNodeId)")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error enviando directo a $targetNodeId: ${e.message}")
+                    }
+                }
+
+                // 3. MessageClient a todos los nodos conectados
                 try {
                     val nodeClient = Wearable.getNodeClient(context)
                     val nodes = nodeClient.connectedNodes.await()
-                    val messageClient = Wearable.getMessageClient(context)
                     for (node in nodes) {
-                        messageClient.sendMessage(node.id, CAMERAS_PATH, bytes).await()
-                        Log.d(TAG, "Mensaje de cámaras entregado al nodo: ${node.displayName} (${node.id})")
+                        if (node.id != targetNodeId) {
+                            try {
+                                messageClient.sendMessage(node.id, CAMERAS_PATH, bytes).await()
+                                Log.d(TAG, "Mensaje de cámaras entregado al nodo: ${node.displayName} (${node.id})")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error enviando a nodo ${node.displayName}: ${e.message}")
+                            }
+                        }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Error enviando MessageClient: ${e.message}")
+                    Log.w(TAG, "Error consultando nodos en celular: ${e.message}")
                 }
 
-                // 3. Difusión local por Wi-Fi / UDP a toda la red local
-                try {
-                    DatagramSocket().use { udpSocket ->
-                        udpSocket.broadcast = true
-                        val udpPayload = ("FRCAM_CAMERAS_JSON:" + camerasJson).toByteArray(Charsets.UTF_8)
-                        val broadcastAddr = InetAddress.getByName("255.255.255.255")
-                        val packet = DatagramPacket(udpPayload, udpPayload.size, broadcastAddr, LAN_SYNC_PORT)
-                        udpSocket.send(packet)
-                        Log.d(TAG, "Cámaras transmitidas por difusión Wi-Fi UDP puerto $LAN_SYNC_PORT")
-                    }
-                } catch (_: Exception) {}
+                // Feedback visual en el teléfono
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(
+                        context,
+                        "Sincronizando ${camsToSend.size} cámaras con Wear OS...",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
 
             } catch (e: Exception) {
                 Log.w(TAG, "Error general sincronizando con Wear OS: ${e.message}")
@@ -140,7 +202,8 @@ object PhoneWearSyncEngine {
         val listener = MessageClient.OnMessageReceivedListener { messageEvent ->
             if (messageEvent.path == REQUEST_SYNC_PATH) {
                 Log.d(TAG, "Solicitud de sincronización recibida desde el reloj (${messageEvent.sourceNodeId})")
-                syncCamerasToWatch(context, getCameras())
+                val cams = getCameras().ifEmpty { cachedCameras }
+                syncCamerasToWatch(context, cams, targetNodeId = messageEvent.sourceNodeId)
             }
         }
         Wearable.getMessageClient(context).addListener(listener)

@@ -17,6 +17,10 @@
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.FrCam">
 
+        <uses-library
+            android:name="com.google.android.wearable"
+            android:required="false" />
+
         <meta-data
             android:name="com.google.android.wearable.standalone"
             android:value="true" />

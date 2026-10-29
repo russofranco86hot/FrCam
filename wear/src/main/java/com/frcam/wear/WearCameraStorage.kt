@@ -56,12 +56,14 @@ object WearCameraStorage {
         }
     }
 
-    fun saveJsonString(context: Context, camerasJson: String) {
-        try {
+    fun saveJsonString(context: Context, camerasJson: String): Int {
+        return try {
             val list = json.decodeFromString<List<CameraConfig>>(camerasJson)
             saveCameras(context, list)
+            list.size
         } catch (e: Exception) {
-            Log.e(TAG, "Error parseando json recibido en reloj", e)
+            Log.e(TAG, "Error parseando json recibido en reloj: ${e.message}", e)
+            0
         }
     }
 }
