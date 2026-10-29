@@ -15,6 +15,7 @@ import com.frcam.app.model.DiscoveredCameraDevice
 import com.frcam.app.model.GridLayoutMode
 import com.frcam.app.model.WifiNetworkScanResult
 import com.frcam.app.protocol.CameraControlEngine
+import com.frcam.app.protocol.CameraProvisioningEngine
 import com.frcam.app.protocol.ConnectionDiagnosticResult
 import com.frcam.app.protocol.NetworkCameraScanner
 import com.frcam.app.protocol.PtzDirection
@@ -22,6 +23,7 @@ import com.frcam.app.protocol.RingAuthOutcome
 import com.frcam.app.protocol.RingCloudClient
 import com.frcam.app.protocol.RingCloudDevice
 import com.frcam.app.protocol.V380AuxCommand
+import com.frcam.app.protocol.WaitingCameraAp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -96,6 +98,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _adminStatusMessage = MutableStateFlow<String?>(null)
     val adminStatusMessage: StateFlow<String?> = _adminStatusMessage.asStateFlow()
 
+    private val _waitingCameraAps = MutableStateFlow<List<WaitingCameraAp>>(emptyList())
+    val waitingCameraAps: StateFlow<List<WaitingCameraAp>> = _waitingCameraAps.asStateFlow()
+
+    private val _isScanningWaitingCameras = MutableStateFlow(false)
+    val isScanningWaitingCameras: StateFlow<Boolean> = _isScanningWaitingCameras.asStateFlow()
+
+    private val _isProvisioningCamera = MutableStateFlow(false)
+    val isProvisioningCamera: StateFlow<Boolean> = _isProvisioningCamera.asStateFlow()
+
+    private val _provisioningStatusMessage = MutableStateFlow<String?>(null)
+    val provisioningStatusMessage: StateFlow<String?> = _provisioningStatusMessage.asStateFlow()
+
     init {
         viewModelScope.launch {
             ringRefreshToken.collectLatest { token ->
@@ -167,6 +181,67 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 _isScanningLan.value = false
             }
         }
+    }
+
+    fun scanWaitingCameras(context: Context) {
+        if (_isScanningWaitingCameras.value) return
+        _isScanningWaitingCameras.value = true
+        _provisioningStatusMessage.value = "Buscando cámaras nuevas en modo AP..."
+
+        viewModelScope.launch {
+            try {
+                val aps = CameraProvisioningEngine.scanWaitingCameras(context)
+                _waitingCameraAps.value = aps
+                _provisioningStatusMessage.value = if (aps.isEmpty()) {
+                    "No se detectaron cámaras en modo AP cerca. Si la cámara fue reseteada, espera 20s a que anuncie 'Access Point ready'."
+                } else {
+                    "Se encontraron ${aps.size} cámara(s) esperando ser configuradas."
+                }
+            } catch (e: Exception) {
+                _provisioningStatusMessage.value = "Error escaneando cámaras: ${e.message}"
+            } finally {
+                _isScanningWaitingCameras.value = false
+            }
+        }
+    }
+
+    fun provisionWaitingCamera(
+        cameraAp: WaitingCameraAp,
+        homeSsid: String,
+        homePass: String,
+        onSuccess: (CameraConfig) -> Unit
+    ) {
+        if (_isProvisioningCamera.value) return
+        _isProvisioningCamera.value = true
+        _provisioningStatusMessage.value = "Enviando credenciales Wi-Fi a la cámara ${cameraAp.extractedDeviceId}..."
+
+        viewModelScope.launch {
+            try {
+                val res = CameraProvisioningEngine.provisionCameraToHomeWifi(cameraAp, homeSsid, homePass)
+                if (res.isSuccess) {
+                    _provisioningStatusMessage.value = res.getOrNull()
+                    val newConfig = CameraProvisioningEngine.createConfigFromWaitingCamera(cameraAp)
+                    addOrUpdateCamera(newConfig)
+                    onSuccess(newConfig)
+                } else {
+                    _provisioningStatusMessage.value = "Error: ${res.exceptionOrNull()?.message}"
+                }
+            } catch (e: Exception) {
+                _provisioningStatusMessage.value = "Error al vincular: ${e.message}"
+            } finally {
+                _isProvisioningCamera.value = false
+            }
+        }
+    }
+
+    fun addWaitingCameraDirect(cameraAp: WaitingCameraAp, onDone: (CameraConfig) -> Unit) {
+        val newConfig = CameraProvisioningEngine.createConfigFromWaitingCamera(cameraAp)
+        addOrUpdateCamera(newConfig)
+        onDone(newConfig)
+    }
+
+    fun clearProvisioningStatus() {
+        _provisioningStatusMessage.value = null
     }
 
     fun sendPtzCommand(camera: CameraConfig, direction: PtzDirection) {

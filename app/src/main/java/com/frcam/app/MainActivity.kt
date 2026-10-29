@@ -77,11 +77,15 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             FrCamTheme {
-                // Runtime Permissions (Microphone for Intercom and Notifications for Motion Alerts)
+                // Runtime Permissions (Microphone for Intercom, Notifications for Motion Alerts, Location/Nearby for Wi-Fi Camera Discovery)
                 val permissionsToRequest = remember {
-                    val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
+                    val list = mutableListOf(
+                        Manifest.permission.RECORD_AUDIO,
+                        Manifest.permission.ACCESS_FINE_LOCATION
+                    )
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         list.add(Manifest.permission.POST_NOTIFICATIONS)
+                        list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
                     }
                     list.toTypedArray()
                 }
@@ -104,6 +108,10 @@ class MainActivity : ComponentActivity() {
                 val scanProgress by viewModel.scanProgress.collectAsState()
                 val scanStatusText by viewModel.scanStatusText.collectAsState()
                 val discoveredDevices by viewModel.discoveredDevices.collectAsState()
+                val waitingCameraAps by viewModel.waitingCameraAps.collectAsState()
+                val isScanningWaiting by viewModel.isScanningWaitingCameras.collectAsState()
+                val isProvisioning by viewModel.isProvisioningCamera.collectAsState()
+                val provisioningStatus by viewModel.provisioningStatusMessage.collectAsState()
                 val ptzFeedback by viewModel.ptzFeedback.collectAsState()
                 val diagnosticResult by viewModel.diagnosticResult.collectAsState()
                 val isTestingConnection by viewModel.isTestingConnection.collectAsState()
@@ -333,8 +341,24 @@ class MainActivity : ComponentActivity() {
                             editingCamera = viewModel.buildConfigFromDiscovered(discovered)
                             showAddEditSheet = true
                         },
+                        waitingCameraAps = waitingCameraAps,
+                        isScanningWaiting = isScanningWaiting,
+                        isProvisioning = isProvisioning,
+                        provisioningStatus = provisioningStatus,
+                        onScanWaitingCameras = { viewModel.scanWaitingCameras(this@MainActivity) },
+                        onProvisionWaitingCamera = { ap, ssid, pass ->
+                            viewModel.provisionWaitingCamera(ap, ssid, pass) { newCam ->
+                                showScannerDialog = false
+                            }
+                        },
+                        onAddWaitingCameraDirect = { ap ->
+                            viewModel.addWaitingCameraDirect(ap) { newCam ->
+                                showScannerDialog = false
+                            }
+                        },
                         onDismiss = {
                             showScannerDialog = false
+                            viewModel.clearProvisioningStatus()
                         }
                     )
                 }
