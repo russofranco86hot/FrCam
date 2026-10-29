@@ -22,21 +22,39 @@ android {
         vectorDrawables.useSupportLibrary = true
     }
 
+    val frcamKeystoreFile: File? = run {
+        val props = Properties()
+        val f = rootProject.file("keystore.properties")
+        if (f.exists()) f.inputStream().use { props.load(it) }
+        val storeProp = props.getProperty("storeFile", "../keystore/frcam.keystore")
+        val directFile = file(storeProp)
+        val rootFile = rootProject.file(storeProp.removePrefix("../"))
+        when {
+            directFile.exists() -> directFile
+            rootFile.exists() -> rootFile
+            else -> null
+        }
+    }
+
     signingConfigs {
-        create("frcam") {
-            val props = Properties()
-            val f = rootProject.file("keystore.properties")
-            if (f.exists()) f.inputStream().use { props.load(it) }
-            storeFile = file(props.getProperty("storeFile", "../keystore/frcam.keystore"))
-            storePassword = props.getProperty("storePassword", "android")
-            keyAlias = props.getProperty("keyAlias", "androiddebugkey")
-            keyPassword = props.getProperty("keyPassword", "android")
+        if (frcamKeystoreFile != null) {
+            create("frcam") {
+                val props = Properties()
+                val f = rootProject.file("keystore.properties")
+                if (f.exists()) f.inputStream().use { props.load(it) }
+                storeFile = frcamKeystoreFile
+                storePassword = props.getProperty("storePassword", "android")
+                keyAlias = props.getProperty("keyAlias", "androiddebugkey")
+                keyPassword = props.getProperty("keyPassword", "android")
+            }
         }
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("frcam")
+            if (frcamKeystoreFile != null) {
+                signingConfig = signingConfigs.getByName("frcam")
+            }
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(
@@ -45,7 +63,9 @@ android {
             )
         }
         debug {
-            signingConfig = signingConfigs.getByName("frcam")
+            if (frcamKeystoreFile != null) {
+                signingConfig = signingConfigs.getByName("frcam")
+            }
             isDebuggable = true
         }
     }
