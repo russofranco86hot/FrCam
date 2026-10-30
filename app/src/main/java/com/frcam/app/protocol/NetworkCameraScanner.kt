@@ -286,7 +286,7 @@ object NetworkCameraScanner {
                     "DISCOVER\n".toByteArray(Charsets.US_ASCII),
                     byteArrayOf(0x00, 0x00, 0x00, 0x00)
                 )
-                val targetPorts = listOf(6123, 10002, 10003, 16123, 6600)
+                val targetPorts = listOf(20190, 6123, 10002, 10003, 16123, 6600, 32108)
                 for (port in targetPorts) {
                     for (payload in probePayloads) {
                         try {
@@ -337,7 +337,7 @@ object NetworkCameraScanner {
     private fun probeCameraPorts(ip: String, timeoutMs: Int): List<Int> {
         val open = mutableListOf<Int>()
         val primaryPorts = listOf(
-            10554, 8800, 6123, 10002, 10003, 16123, 554, 8899, 10080, 8554, 2020, 8000, 81, 8080, 80, 6600, 6001, 8888, 5000, 8088, 9988, 37777, 34567, 8081, 88, 7070, 23
+            20190, 20023, 10554, 8800, 6123, 10002, 10003, 16123, 554, 8899, 10080, 8554, 2020, 8000, 81, 8080, 80, 6600, 6001, 8888, 5000, 8088, 9988, 37777, 34567, 8081, 88, 7070, 23
         )
         for (port in primaryPorts) {
             if (isTcpPortOpen(ip, port, timeoutMs)) {
@@ -444,7 +444,7 @@ object NetworkCameraScanner {
                 )
             }
 
-            openPorts.any { it in listOf(6123, 10002, 10003, 16123, 6600, 6001, 10000) } -> {
+            openPorts.any { it in listOf(20190, 20023, 6123, 10002, 10003, 16123, 6600, 6001, 10000) } -> {
                 DiscoveredCameraDevice(
                     ipAddress = ip,
                     detectedBrand = CameraBrand.V720_NAXCLOW,
@@ -452,7 +452,7 @@ object NetworkCameraScanner {
                     openPorts = openPorts,
                     rtspPort = 554,
                     httpPort = if (openPorts.contains(8080)) 8080 else 80,
-                    onvifPort = openPorts.firstOrNull { it in listOf(6123, 10002, 10003, 16123) } ?: 6123,
+                    onvifPort = openPorts.firstOrNull { it in listOf(20190, 6123, 10002, 10003, 16123) } ?: 20190,
                     onvifServiceUrl = onvifServiceUrl,
                     suggestedMainPath = "/live/ch0",
                     suggestedSubPath = "/mjpeg/1",

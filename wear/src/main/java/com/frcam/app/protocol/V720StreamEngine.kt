@@ -6,6 +6,7 @@ import android.util.Log
 import com.frcam.app.model.CameraConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -44,12 +45,15 @@ object V720StreamEngine {
         val cleanDevId = rawId.filter { it.isLetterOrDigit() }
         val localIp = getLocalIpv4Address() ?: "127.0.0.1"
 
-        // Auto-resolver host si está vacío o no configurado
-        if (host.isBlank() || host == "127.0.0.1" || host == "0.0.0.0") {
+        // Auto-resolver host si está vacío, o si es la IP por defecto de AP y no estamos en esa red
+        val hostIsUnreachableAp = host == "192.168.169.1" && !localIp.startsWith("192.168.169.")
+        if (host.isBlank() || host == "127.0.0.1" || host == "0.0.0.0" || hostIsUnreachableAp) {
             val resolved = resolveV720IpDirectly()
             if (!resolved.isNullOrBlank()) {
                 host = resolved
                 Log.d(TAG, "IP V720 resuelta automáticamente: $host")
+            } else if (hostIsUnreachableAp) {
+                host = ""
             }
         }
 
@@ -86,8 +90,11 @@ object V720StreamEngine {
         onFrame: (Bitmap) -> Unit
     ): Boolean {
         if (host.isBlank()) return false
-        val portsToCheck = listOf(defaultPort, 80, 8080, 81, 6123, 8888, 5000).distinct()
-        val pathsToCheck = listOf("/video", "/stream", "/cam.mjpg", "/live.mjpg", "/mjpeg/1", "/snapshot", "/jpg/image.jpg")
+        val portsToCheck = listOf(defaultPort, 80, 8080, 20190, 81, 6123, 8888, 5000).distinct()
+        val pathsToCheck = listOf(
+            "/video", "/stream", "/cam.mjpg", "/live.mjpg", "/mjpeg/1",
+            "/snapshot", "/jpg/image.jpg", "/live", "/stream.mjpg", "/snapshot.jpg", "/"
+        )
 
         for (port in portsToCheck) {
             if (!isTcpPortOpen(host, port, 300)) continue
@@ -170,16 +177,28 @@ object V720StreamEngine {
             val natReqJson = """{"code":11,"cliTarget":"frcam","cliToken":"55ABfb77","cliIp":"$localIp","cliPort":$localPort,"cliNatIp":"$localIp","cliNatPort":$localPort}"""
             val natReqBytes = natReqJson.toByteArray(Charsets.UTF_8)
 
+            // 0. Si tenemos deviceId, disparar solicitud NAT por MQTT a la nube Naxclow
+            if (deviceId.isNotBlank()) {
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        sendMqttNatReq(deviceId, natReqJson)
+                    } catch (e: Exception) {
+                        Log.d(TAG, "MQTT NAT_REQ fallback: ${e.message}")
+                    }
+                }
+            }
+
             // A) Enviar probes por UDP a la cámara y por broadcast
             val targetIps = mutableListOf<String>()
             if (host.isNotBlank() && host != "127.0.0.1") targetIps.add(host)
             targetIps.add("255.255.255.255")
             targetIps.add("192.168.169.1")
 
+            val udpPorts = listOf(20190, 6123, 10002, 10003, 16123, 32108)
             for (h in targetIps) {
                 try {
                     val destAddr = InetAddress.getByName(h)
-                    for (p in listOf(6123, 10002, 10003, 16123)) {
+                    for (p in udpPorts) {
                         try {
                             socket.send(DatagramPacket(probeBytes, probeBytes.size, destAddr, p))
                             socket.send(DatagramPacket(natReqBytes, natReqBytes.size, destAddr, p))
@@ -188,13 +207,13 @@ object V720StreamEngine {
                     }
                 } catch (_: Exception) {}
 
-                // B) Enviar por TCP a la cámara en puertos 6123 / 10002
+                // B) Enviar por TCP a la cámara en puertos 20190, 20023, 6123, 10002, 8080, 80
                 if (h != "255.255.255.255") {
-                    for (p in listOf(6123, 10002)) {
+                    for (p in listOf(20190, 20023, 6123, 10002, 8080, 80)) {
                         try {
                             Socket().use { tcpSocket ->
-                                tcpSocket.soTimeout = 600
-                                tcpSocket.connect(InetSocketAddress(h, p), 600)
+                                tcpSocket.soTimeout = 400
+                                tcpSocket.connect(InetSocketAddress(h, p), 400)
                                 val out = tcpSocket.getOutputStream()
                                 out.write(probeBytes)
                                 out.write(streamBytes)
@@ -398,6 +417,23 @@ object V720StreamEngine {
         }
     }
 
+    private fun getArpTable(): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        try {
+            java.io.File("/proc/net/arp").forEachLine { line ->
+                val parts = line.split("\\s+".toRegex())
+                if (parts.size >= 4 && parts[0] != "IP") {
+                    val ip = parts[0]
+                    val mac = parts[3].lowercase()
+                    if (mac != "00:00:00:00:00:00" && !mac.contains("incomplete")) {
+                        map[ip] = mac
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return map
+    }
+
     private suspend fun resolveV720IpDirectly(): String? = withContext(Dispatchers.IO) {
         val localIp = getLocalIpv4Address() ?: return@withContext null
         val subnetPrefix = localIp.substringBeforeLast(".")
@@ -409,7 +445,7 @@ object V720StreamEngine {
                 socket.soTimeout = 300
                 val broadcastAddr = InetAddress.getByName("255.255.255.255")
                 val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
-                for (p in listOf(6123, 10002)) {
+                for (p in listOf(20190, 6123, 10002, 10003, 32108)) {
                     socket.send(DatagramPacket(probe, probe.size, broadcastAddr, p))
                 }
                 val buf = ByteArray(1024)
@@ -420,8 +456,18 @@ object V720StreamEngine {
             }
         } catch (_: Exception) {}
 
-        // 2. Probar IPs de la subred concurrentemente
-        val ports = listOf(80, 8080, 554, 81, 6123, 10002)
+        // 2. Consulta de tabla ARP local
+        val arp = getArpTable()
+        for ((ip, _) in arp) {
+            if (ip.startsWith(subnetPrefix) && ip != localIp && !ip.endsWith(".1") && !ip.endsWith(".254")) {
+                for (p in listOf(20190, 20023, 6123, 10002, 8080, 80)) {
+                    if (isTcpPortOpen(ip, p, 100)) return@withContext ip
+                }
+            }
+        }
+
+        // 3. Probar IPs de la subred concurrentemente
+        val ports = listOf(20190, 20023, 80, 8080, 554, 81, 6123, 10002)
         val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
         val found = coroutineScope {
             (1..254).map { octet ->
@@ -429,11 +475,12 @@ object V720StreamEngine {
                     val ip = "$subnetPrefix.$octet"
                     if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) return@async null
 
-                    // UDP 6123
+                    // UDP 20190 y 6123
                     try {
                         DatagramSocket().use { socket ->
                             socket.soTimeout = 80
                             val target = InetAddress.getByName(ip)
+                            socket.send(DatagramPacket(probe, probe.size, target, 20190))
                             socket.send(DatagramPacket(probe, probe.size, target, 6123))
                             val buf = ByteArray(256)
                             val pack = DatagramPacket(buf, buf.size)

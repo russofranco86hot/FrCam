@@ -558,7 +558,7 @@ object BluetoothCameraEngine {
         val localIp = NetworkCameraScanner.getLocalIpv4Address()
         val subnetPrefix = localIp?.substringBeforeLast(".").orEmpty()
         if (subnetPrefix.isNotBlank()) {
-            val v720Ports = listOf(80, 8080, 554, 81, 6123, 10002, 10003, 16123, 8554, 8888, 5000, 6600)
+            val v720Ports = listOf(20190, 20023, 80, 8080, 554, 81, 6123, 10002, 10003, 16123, 8554, 8888, 5000, 6600, 32108)
             val probeData = """{"code":50}""".toByteArray(Charsets.UTF_8)
             val foundIp = coroutineScope {
                 (1..254).map { octet ->
@@ -571,6 +571,7 @@ object BluetoothCameraEngine {
                             java.net.DatagramSocket().use { sock ->
                                 sock.soTimeout = 120
                                 val target = java.net.InetAddress.getByName(ip)
+                                sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 20190))
                                 sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 6123))
                                 sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 10002))
                                 val rBuf = ByteArray(512)

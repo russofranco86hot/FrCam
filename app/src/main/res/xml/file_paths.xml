@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
+    <root-path name="root" path="." />
     <external-path name="external" path="." />
     <external-files-path name="external_files" path="." />
+    <external-media-path name="external_media" path="." />
+    <external-cache-path name="external_cache" path="." />
     <files-path name="internal_files" path="." />
     <cache-path name="cache" path="." />
     <cache-path name="motion_gifs" path="motion_gifs/" />

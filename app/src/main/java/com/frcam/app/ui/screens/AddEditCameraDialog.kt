@@ -122,6 +122,7 @@ import com.frcam.app.model.PtzControlType
 import com.frcam.app.model.TransportMode
 import com.frcam.app.protocol.CameraControlEngine
 import com.frcam.app.protocol.ConnectionDiagnosticResult
+import com.frcam.app.protocol.NetworkCameraScanner
 import com.frcam.app.protocol.RingCloudDevice
 import java.util.UUID
 
@@ -201,7 +202,8 @@ fun AddEditCameraSheet(
 
     fun buildCurrentConfig(): CameraConfig {
         val resolvedHost = if (selectedBrand == CameraBrand.V720_NAXCLOW && host.isBlank()) {
-            "192.168.169.1"
+            val localIp = NetworkCameraScanner.getLocalIpv4Address()
+            if (localIp?.startsWith("192.168.169.") == true) "192.168.169.1" else ""
         } else {
             host.trim()
         }
@@ -1454,7 +1456,7 @@ fun LanDiscoveryDialog(
                                                     }
                                                 }
                                                 Text(
-                                                    text = "💡 Si la cámara ya tiene luz azul FIJA, pulsa 'Buscar IP'. Si PARPADEA RÁPIDO (búsqueda), pulsa 'Vincular a mi Wi-Fi'.",
+                                                    text = "💡 Si la luz azul ya está FIJA, la cámara ya tiene Wi-Fi: pulsa 'Buscar IP'. También puedes ver su IP exacta en la app oficial V720 (Ajustes > Info del dispositivo) y escribirla aquí.",
                                                     fontSize = 10.sp,
                                                     color = Color(0xFF38BDF8),
                                                     modifier = Modifier.padding(vertical = 4.dp)
