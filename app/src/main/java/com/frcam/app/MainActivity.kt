@@ -51,6 +51,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        try {
+            com.frcam.app.wear.FrCamPhoneBridgeService.start(this)
+        } catch (_: Exception) {}
         PhoneWearSyncEngine.onToggleMotion = { id, enabled, recordMode ->
             viewModel.toggleMotionDetection(id, enabled, recordMode)
         }

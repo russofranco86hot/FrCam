@@ -44,8 +44,9 @@ object RingCloudClient {
     @Volatile
     private var cachedRefreshToken: String = ""
 
+    data class LiveRingFrame(val bitmap: Bitmap, val timestamp: Long)
     private val snapshotCache = java.util.concurrent.ConcurrentHashMap<Long, RingFrame>()
-    private val liveFrameCache = java.util.concurrent.ConcurrentHashMap<Long, Bitmap>()
+    private val liveFrameCache = java.util.concurrent.ConcurrentHashMap<Long, LiveRingFrame>()
     private val audioQueues = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.ConcurrentLinkedQueue<ByteArray>>()
 
     fun feedAudioChunk(doorbotId: Long, pcmBytes: ByteArray) {
@@ -70,11 +71,18 @@ object RingCloudClient {
     }
 
     fun updateLiveFrame(doorbotId: Long, bitmap: Bitmap) {
-        liveFrameCache[doorbotId] = bitmap
-        snapshotCache[doorbotId] = RingFrame(bitmap, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        liveFrameCache[doorbotId] = LiveRingFrame(bitmap, now)
+        snapshotCache[doorbotId] = RingFrame(bitmap, now)
     }
 
-    fun getLiveFrame(doorbotId: Long): Bitmap? = liveFrameCache[doorbotId]
+    fun getLiveFrame(doorbotId: Long): Bitmap? {
+        val live = liveFrameCache[doorbotId] ?: return null
+        if (System.currentTimeMillis() - live.timestamp > 800L) {
+            return null
+        }
+        return live.bitmap
+    }
 
     fun getCachedSnapshot(doorbotId: Long): RingFrame? = snapshotCache[doorbotId]
 

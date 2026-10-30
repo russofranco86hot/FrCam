@@ -297,6 +297,10 @@ var remote = new MediaStream();
 var remoteSet = false, pendingIce = [];
 function log(m){ try{ A.onLog(String(m)); }catch(e){} }
 
+videoEl.addEventListener('loadedmetadata', function(){
+  videoEl.play().catch(function(){});
+  startCapture();
+});
 videoEl.addEventListener('playing', function(){
   videoEl.style.opacity = '1';
   try{ A.onLive(videoEl.videoWidth + 'x' + videoEl.videoHeight); }catch(e){}
@@ -315,18 +319,27 @@ window.setMicEnabled = async function(e){
   }catch(err){ log('Micrófono: ' + err.message); }
 };
 
+var capTimer = null;
+var capCanvas = null;
+var capCtx = null;
 function startCapture(){
   if(capTimer) return;
+  if(!capCanvas){
+    capCanvas = document.createElement('canvas');
+    capCtx = capCanvas.getContext('2d');
+  }
   capTimer = setInterval(function(){
     try{
-      if(!videoEl.videoWidth) return;
+      if(!videoEl.videoWidth || !videoEl.videoHeight) return;
       var w = Math.min(videoEl.videoWidth, 480);
       var h = Math.round(w * videoEl.videoHeight / videoEl.videoWidth);
-      var c = document.createElement('canvas'); c.width = w; c.height = h;
-      c.getContext('2d').drawImage(videoEl, 0, 0, w, h);
-      A.onFrame(c.toDataURL('image/jpeg', 0.7));
+      if(capCanvas.width !== w || capCanvas.height !== h){
+        capCanvas.width = w; capCanvas.height = h;
+      }
+      capCtx.drawImage(videoEl, 0, 0, w, h);
+      A.onFrame(capCanvas.toDataURL('image/jpeg', 0.65));
     }catch(e){}
-  }, 200);
+  }, 125);
 }
 
 function dirs(sdp){
@@ -363,16 +376,20 @@ window.onRingIce = function(c, idx){
 var audioContext = null;
 function setupAudioCapture(stream){
   try{
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 8000});
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
     if(audioContext.state === 'suspended'){ audioContext.resume().catch(function(){}); }
+    var inRate = audioContext.sampleRate || 48000;
+    var step = inRate / 8000.0;
     var src = audioContext.createMediaStreamSource(stream);
-    var proc = audioContext.createScriptProcessor(2048, 1, 1);
+    var proc = audioContext.createScriptProcessor(4096, 1, 1);
     proc.onaudioprocess = function(e){
       if(audioContext && audioContext.state === 'suspended'){ audioContext.resume().catch(function(){}); }
       var f32 = e.inputBuffer.getChannelData(0);
-      var i16 = new Int16Array(f32.length);
-      for(var i=0; i<f32.length; i++){
-        var s = Math.max(-1, Math.min(1, f32[i]));
+      var outLen = Math.floor(f32.length / step);
+      var i16 = new Int16Array(outLen);
+      for(var i=0; i<outLen; i++){
+        var idx = Math.min(Math.floor(i * step), f32.length - 1);
+        var s = Math.max(-1, Math.min(1, f32[idx]));
         i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
       var bytes = new Uint8Array(i16.buffer);
@@ -382,6 +399,7 @@ function setupAudioCapture(stream){
     };
     src.connect(proc);
     proc.connect(audioContext.destination);
+    log('Audio Ring activo (' + inRate + 'Hz -> 8000Hz)');
   }catch(err){ log('Audio capture error: ' + err.message); }
 }
 
@@ -389,11 +407,14 @@ var micAudioCtx = null;
 window.feedRemoteMicPcm = function(b64){
   try{
     if(!micAudioCtx){
-      micAudioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 8000});
+      micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
       if(micAudioCtx.state === 'suspended'){ micAudioCtx.resume().catch(function(){}); }
       var dest = micAudioCtx.createMediaStreamDestination();
       micAudioCtx._dest = dest;
-      if(audioSender){ audioSender.replaceTrack(dest.stream.getAudioTracks()[0]); }
+      if(audioSender){
+        audioSender.replaceTrack(dest.stream.getAudioTracks()[0]);
+        log('Microfono conectado a Ring audioSender');
+      }
     }
     if(micAudioCtx.state === 'suspended'){ micAudioCtx.resume().catch(function(){}); }
     var raw = atob(b64);

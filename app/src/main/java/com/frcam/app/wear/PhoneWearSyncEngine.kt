@@ -141,8 +141,12 @@ object PhoneWearSyncEngine {
                                                 out.write("\r\n".toByteArray(Charsets.UTF_8))
                                                 out.flush()
                                             }
-                                            // Refresco a 5 FPS para movimiento en vivo real
-                                            delay(200L)
+                                            // Refresco fluido a 10 FPS si hay WebRTC en vivo, o 1s si es snapshot
+                                            if (liveBmp != null) {
+                                                delay(100L)
+                                            } else {
+                                                delay(250L)
+                                            }
                                         }
                                     } catch (_: Exception) {}
                                     finally {
@@ -170,7 +174,7 @@ object PhoneWearSyncEngine {
                                             out.write(chunk)
                                             out.flush()
                                         } else {
-                                            delay(30L)
+                                            delay(20L)
                                         }
                                     }
                                 } catch (_: Exception) {}

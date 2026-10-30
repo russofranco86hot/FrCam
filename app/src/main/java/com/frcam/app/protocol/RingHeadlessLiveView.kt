@@ -104,6 +104,8 @@ object RingHeadlessLiveViewManager {
                                 "AndroidRing"
                             )
                             RingWebRtcController.register("headless_$doorbotId", this)
+                            onResume()
+                            resumeTimers()
                             loadDataWithBaseURL(
                                 "https://app.frcam.local/",
                                 RingWebRtcHtml.build(mutedInitially = false),

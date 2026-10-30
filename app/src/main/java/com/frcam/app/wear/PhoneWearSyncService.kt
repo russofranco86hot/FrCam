@@ -23,11 +23,14 @@ class PhoneWearSyncService : WearableListenerService() {
     override fun onCreate() {
         super.onCreate()
         try {
-            PhoneWearSyncEngine.startLanSyncServer(applicationContext) { emptyList() }
+            FrCamPhoneBridgeService.start(applicationContext)
         } catch (_: Exception) {}
     }
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
+        try {
+            FrCamPhoneBridgeService.start(applicationContext)
+        } catch (_: Exception) {}
         if (messageEvent.path == REQUEST_SYNC_PATH) {
             val sourceId = messageEvent.sourceNodeId
             Log.d(TAG, "Solicitud de cámaras recibida en el celular desde nodo: $sourceId")

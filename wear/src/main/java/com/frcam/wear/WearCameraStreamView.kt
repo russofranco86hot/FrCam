@@ -119,10 +119,6 @@ fun WearCameraStreamView(
                 val doorbotId = remember(camera.deviceId) {
                     camera.deviceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
                 }
-                val phoneHost = remember(camera.remoteHost, camera.host) {
-                    (WearCameraStorage.lastKnownPhoneIp ?: camera.remoteHost.ifBlank { camera.host })
-                        .trim().removePrefix("http://").substringBefore(":")
-                }
 
                 DisposableEffect(audioPlayer) {
                     onDispose {
@@ -134,27 +130,31 @@ fun WearCameraStreamView(
                     audioPlayer.setMuted(isMuted)
                 }
 
-                LaunchedEffect(isMuted, phoneHost, doorbotId) {
-                    if (!isMuted && doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
-                        withContext(Dispatchers.IO) {
-                            try {
-                                val audioUrl = "http://$phoneHost:49880/ring_audio?id=$doorbotId"
-                                val conn = (URL(audioUrl).openConnection() as HttpURLConnection).apply {
-                                    connectTimeout = 3000
-                                    readTimeout = 4000
-                                }
-                                if (conn.responseCode in 200..299) {
-                                    val input = BufferedInputStream(conn.inputStream, 4096)
-                                    val buffer = ByteArray(640)
-                                    while (isActive && !isMuted) {
-                                        val read = input.read(buffer)
-                                        if (read <= 0) break
-                                        val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
-                                        audioPlayer.playAudioFrame(chunk, isAlaw = false)
+                LaunchedEffect(isMuted, doorbotId) {
+                    if (!isMuted && doorbotId > 0L) {
+                        val currentPhoneHost = (WearCameraStorage.lastKnownPhoneIp ?: camera.remoteHost.ifBlank { camera.host })
+                            .trim().removePrefix("http://").substringBefore(":")
+                        if (currentPhoneHost.isNotBlank() && !currentPhoneHost.endsWith(".")) {
+                            withContext(Dispatchers.IO) {
+                                try {
+                                    val audioUrl = "http://$currentPhoneHost:49880/ring_audio?id=$doorbotId"
+                                    val conn = (URL(audioUrl).openConnection() as HttpURLConnection).apply {
+                                        connectTimeout = 3000
+                                        readTimeout = 4000
                                     }
-                                }
-                                conn.disconnect()
-                            } catch (_: Exception) {}
+                                    if (conn.responseCode in 200..299) {
+                                        val input = BufferedInputStream(conn.inputStream, 4096)
+                                        val buffer = ByteArray(640)
+                                        while (isActive && !isMuted) {
+                                            val read = input.read(buffer)
+                                            if (read <= 0) break
+                                            val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
+                                            audioPlayer.playAudioFrame(chunk, isAlaw = false)
+                                        }
+                                    }
+                                    conn.disconnect()
+                                } catch (_: Exception) {}
+                            }
                         }
                     }
                 }
@@ -169,12 +169,15 @@ fun WearCameraStreamView(
                     var updateCounter = 0
 
                     while (isActive) {
+                        val currentPhoneHost = (WearCameraStorage.lastKnownPhoneIp ?: camera.remoteHost.ifBlank { camera.host })
+                            .trim().removePrefix("http://").substringBefore(":")
+
                         try {
-                            // Flujo 1: Si hay servidor del celular, conectar al stream continuo MJPEG en vivo (4-5 FPS)
+                            // Flujo 1: Si hay servidor del celular, conectar al stream continuo MJPEG en vivo (10 FPS)
                             val streamUrl = if (!snapUrl.isNullOrBlank() && snapUrl.contains("ring_stream")) {
                                 snapUrl
-                            } else if (doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
-                                "http://$phoneHost:49880/ring_stream?id=$doorbotId"
+                            } else if (doorbotId > 0L && currentPhoneHost.isNotBlank() && !currentPhoneHost.endsWith(".")) {
+                                "http://$currentPhoneHost:49880/ring_stream?id=$doorbotId"
                             } else null
 
                             var streamSuccess = false
@@ -188,37 +191,42 @@ fun WearCameraStreamView(
                                         if (conn.responseCode in 200..299) {
                                             streamSuccess = true
                                             failCount = 0
-                                            val input = BufferedInputStream(conn.inputStream, 16384)
-                                            val buffer = ByteArrayOutputStream(65536)
+                                            val input = BufferedInputStream(conn.inputStream, 32768)
+                                            val readBuf = ByteArray(8192)
+                                            val frameBuf = ByteArrayOutputStream(65536)
+                                            var inFrame = false
                                             var prevByte = -1
-                                            var capturing = false
 
                                             while (isActive) {
-                                                val b = input.read()
-                                                if (b == -1) break
-                                                if (!capturing) {
-                                                    if (prevByte == 0xFF && b == 0xD8) {
-                                                        capturing = true
-                                                        buffer.reset()
-                                                        buffer.write(0xFF)
-                                                        buffer.write(0xD8)
-                                                    }
-                                                } else {
-                                                    buffer.write(b)
-                                                    if (prevByte == 0xFF && b == 0xD9) {
-                                                        val jpegBytes = buffer.toByteArray()
-                                                        val streamBmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-                                                        if (streamBmp != null) {
-                                                            withContext(Dispatchers.Main) {
-                                                                currentBitmap = streamBmp
-                                                                isConnecting = false
-                                                                errorMessage = null
-                                                            }
+                                                val count = input.read(readBuf)
+                                                if (count <= 0) break
+
+                                                for (i in 0 until count) {
+                                                    val b = readBuf[i].toInt() and 0xFF
+                                                    if (!inFrame) {
+                                                        if (prevByte == 0xFF && b == 0xD8) {
+                                                            inFrame = true
+                                                            frameBuf.reset()
+                                                            frameBuf.write(0xFF)
+                                                            frameBuf.write(0xD8)
                                                         }
-                                                        capturing = false
+                                                    } else {
+                                                        frameBuf.write(b)
+                                                        if (prevByte == 0xFF && b == 0xD9) {
+                                                            val jpegBytes = frameBuf.toByteArray()
+                                                            val streamBmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+                                                            if (streamBmp != null) {
+                                                                withContext(Dispatchers.Main) {
+                                                                    currentBitmap = streamBmp
+                                                                    isConnecting = false
+                                                                    errorMessage = null
+                                                                }
+                                                            }
+                                                            inFrame = false
+                                                        }
                                                     }
+                                                    prevByte = b
                                                 }
-                                                prevByte = b
                                             }
                                         }
                                         conn.disconnect()
@@ -232,9 +240,9 @@ fun WearCameraStreamView(
                                     val now = System.currentTimeMillis()
 
                                     // Opción A: Servidor local del celular en LAN (/ring_snapshot)
-                                    if (doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
+                                    if (doorbotId > 0L && currentPhoneHost.isNotBlank() && !currentPhoneHost.endsWith(".")) {
                                         try {
-                                            val conn = (URL("http://$phoneHost:49880/ring_snapshot?id=$doorbotId")
+                                            val conn = (URL("http://$currentPhoneHost:49880/ring_snapshot?id=$doorbotId")
                                                 .openConnection() as HttpURLConnection).apply {
                                                 connectTimeout = 1800
                                                 readTimeout = 2000
