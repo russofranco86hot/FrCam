@@ -70,7 +70,10 @@ object PhoneWearSyncEngine {
                             if (firstLine.contains("/ring_snapshot")) {
                                 val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
                                 val id = idStr?.toLongOrNull() ?: 0L
-                                val frame = if (id > 0L) com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id) else null
+                                var frame = if (id > 0L) com.frcam.app.protocol.RingCloudClient.getCachedSnapshot(id) else null
+                                if (frame == null && id > 0L) {
+                                    frame = com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)
+                                }
                                 if (frame != null) {
                                     val bos = java.io.ByteArrayOutputStream()
                                     frame.bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, bos)
@@ -84,15 +87,43 @@ object PhoneWearSyncEngine {
                                     out.write(imgBytes)
                                     out.flush()
                                     client.close()
+                                    // Trigger async pre-fetch for upcoming requests
+                                    CoroutineScope(Dispatchers.IO).launch {
+                                        try {
+                                            com.frcam.app.protocol.RingCloudClient.triggerSnapshotUpdate(id)
+                                            com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)
+                                        } catch (_: Exception) {}
+                                    }
+                                    return@launch
+                                } else {
+                                    val out = client.getOutputStream()
+                                    val header = "HTTP/1.1 404 Not Found\r\n" +
+                                            "Content-Type: text/plain\r\n" +
+                                            "Content-Length: 0\r\n" +
+                                            "Connection: close\r\n\r\n"
+                                    out.write(header.toByteArray(Charsets.UTF_8))
+                                    out.flush()
+                                    client.close()
                                     return@launch
                                 }
                             }
 
-                            val ringToken = com.frcam.app.protocol.RingCloudClient.getActiveToken()
+                            val localIp = com.frcam.app.protocol.NetworkCameraScanner.getLocalIpv4Address().orEmpty()
+                            val ringToken = com.frcam.app.protocol.RingCloudClient.ensureValidAccessToken()
+                                ?: com.frcam.app.protocol.RingCloudClient.getActiveToken()
                             val cams = (cachedCameras.ifEmpty { getCameras() }).map { cam ->
                                 var updated = cam.copy(liveInDashboard = true)
-                                if (updated.brand == com.frcam.app.model.CameraBrand.RING_CLOUD && updated.password.isBlank() && ringToken.isNotBlank()) {
-                                    updated = updated.copy(password = ringToken)
+                                if (updated.brand == com.frcam.app.model.CameraBrand.RING_CLOUD) {
+                                    if (updated.password.isBlank() && ringToken.isNotBlank()) {
+                                        updated = updated.copy(password = ringToken)
+                                    }
+                                    if (localIp.isNotBlank()) {
+                                        val doorbotId = updated.deviceId.filter { it.isDigit() }
+                                        updated = updated.copy(
+                                            customStreamUrl = "http://$localIp:$LAN_SYNC_PORT/ring_snapshot?id=$doorbotId",
+                                            remoteHost = localIp
+                                        )
+                                    }
                                 }
                                 updated
                             }
@@ -149,11 +180,21 @@ object PhoneWearSyncEngine {
      * Envía la lista completa de cámaras al reloj por todos los canales disponibles.
      */
     fun syncCamerasToWatch(context: Context, cameras: List<CameraConfig>, targetNodeId: String? = null) {
+        val localIp = com.frcam.app.protocol.NetworkCameraScanner.getLocalIpv4Address().orEmpty()
         val ringToken = com.frcam.app.protocol.RingCloudClient.getActiveToken()
         val activeCameras = cameras.map { cam ->
             var updated = cam.copy(liveInDashboard = true)
-            if (updated.brand == com.frcam.app.model.CameraBrand.RING_CLOUD && updated.password.isBlank() && ringToken.isNotBlank()) {
-                updated = updated.copy(password = ringToken)
+            if (updated.brand == com.frcam.app.model.CameraBrand.RING_CLOUD) {
+                if (updated.password.isBlank() && ringToken.isNotBlank()) {
+                    updated = updated.copy(password = ringToken)
+                }
+                if (localIp.isNotBlank()) {
+                    val doorbotId = updated.deviceId.filter { it.isDigit() }
+                    updated = updated.copy(
+                        customStreamUrl = "http://$localIp:$LAN_SYNC_PORT/ring_snapshot?id=$doorbotId",
+                        remoteHost = localIp
+                    )
+                }
             }
             updated
         }
@@ -163,7 +204,17 @@ object PhoneWearSyncEngine {
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val camsToSend = if (activeCameras.isNotEmpty()) activeCameras else cachedCameras
+                // Asegurar token de acceso fresco si hay cámaras Ring
+                val hasRing = activeCameras.any { it.brand == com.frcam.app.model.CameraBrand.RING_CLOUD }
+                val freshRingToken = if (hasRing) {
+                    com.frcam.app.protocol.RingCloudClient.ensureValidAccessToken() ?: ringToken
+                } else ringToken
+
+                val camsToSend = (if (activeCameras.isNotEmpty()) activeCameras else cachedCameras).map { cam ->
+                    if (cam.brand == com.frcam.app.model.CameraBrand.RING_CLOUD && freshRingToken.isNotBlank()) {
+                        cam.copy(password = freshRingToken)
+                    } else cam
+                }
                 if (camsToSend.isEmpty()) {
                     Log.w(TAG, "No hay cámaras para sincronizar")
                     return@launch

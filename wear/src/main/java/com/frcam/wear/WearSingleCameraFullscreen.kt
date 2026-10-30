@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -192,9 +193,9 @@ fun WearSingleCameraFullscreen(
             )
         }
 
-        // Chip flotante con nombre de cámara e índice (se oculta automáticamente)
+        // Chip flotante rápido con nombre de cámara e índice cuando los controles están ocultos
         AnimatedVisibility(
-            visible = (cameraPillVisible || showOverlayControls) && !isBroadcasting,
+            visible = cameraPillVisible && !showOverlayControls && !isBroadcasting,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -248,7 +249,7 @@ fun WearSingleCameraFullscreen(
             }
         }
 
-        // Controles superpuestos (Volver, Audio, Micrófono, Navegación y Zoom)
+        // Controles superpuestos (Barra superior unificada y centrada, Navegación y Barra de Zoom/Mic)
         AnimatedVisibility(
             visible = showOverlayControls || isBroadcasting,
             enter = fadeIn(),
@@ -256,43 +257,64 @@ fun WearSingleCameraFullscreen(
             modifier = Modifier.fillMaxSize()
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Botón volver arriba a la izquierda
-                IconButton(
-                    onClick = {
-                        broadcaster.stopBroadcasting()
-                        onBackToGrid()
-                    },
+                // Barra superior unificada y centrada (protegida del bisel circular de Wear OS)
+                Surface(
+                    color = Color.Black.copy(alpha = 0.80f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(top = 12.dp, start = 12.dp)
-                        .size(32.dp)
-                        .background(Color.Black.copy(alpha = 0.70f), CircleShape)
+                        .align(Alignment.TopCenter)
+                        .padding(top = if (isBroadcasting) 38.dp else 10.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.GridView,
-                        contentDescription = "Ver todas las cámaras",
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
+                    Row(
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        // Botón volver a vista de cuadrícula
+                        IconButton(
+                            onClick = {
+                                broadcaster.stopBroadcasting()
+                                onBackToGrid()
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.GridView,
+                                contentDescription = "Ver todas las cámaras",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
 
-                // Botón de Sonido (Mute / Unmute) arriba a la derecha
-                IconButton(
-                    onClick = {
-                        isMuted = !isMuted
-                    },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 12.dp, end = 12.dp)
-                        .size(32.dp)
-                        .background(Color.Black.copy(alpha = 0.70f), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                        contentDescription = if (isMuted) "Activar sonido" else "Silenciar",
-                        tint = if (isMuted) Color(0xFF94A3B8) else Color(0xFF38BDF8),
-                        modifier = Modifier.size(16.dp)
-                    )
+                        // Título y número de cámara en el centro
+                        Text(
+                            text = "${currentIndex + 1}/${cameras.size} • ${currentCamera.name}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF38BDF8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .widthIn(max = 105.dp)
+                                .padding(horizontal = 2.dp)
+                        )
+
+                        // Botón de Sonido (Mute / Unmute)
+                        IconButton(
+                            onClick = {
+                                isMuted = !isMuted
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = if (isMuted) "Activar sonido" else "Silenciar",
+                                tint = if (isMuted) Color(0xFF94A3B8) else Color(0xFF38BDF8),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
                 }
 
                 // Flechas de cambio de cámara (anterior y siguiente)

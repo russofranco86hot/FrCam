@@ -44,8 +44,16 @@ object RingCloudClient {
     @Volatile
     private var cachedRefreshToken: String = ""
 
+    private val snapshotCache = java.util.concurrent.ConcurrentHashMap<Long, RingFrame>()
+
     fun getActiveAccessToken(): String = cachedAccessToken
     fun getActiveToken(): String = cachedAccessToken.ifBlank { cachedRefreshToken }
+
+    fun invalidateAccessToken() {
+        cachedAccessToken = ""
+    }
+
+    fun getCachedSnapshot(doorbotId: Long): RingFrame? = snapshotCache[doorbotId]
 
     fun setSavedRefreshToken(token: String) {
         if (token.isNotBlank()) {
@@ -147,8 +155,8 @@ object RingCloudClient {
         }
     }
 
-    suspend fun ensureValidAccessToken(): String? = withContext(Dispatchers.IO) {
-        if (cachedAccessToken.isNotBlank()) return@withContext cachedAccessToken
+    suspend fun ensureValidAccessToken(forceRefresh: Boolean = false): String? = withContext(Dispatchers.IO) {
+        if (!forceRefresh && cachedAccessToken.isNotBlank()) return@withContext cachedAccessToken
         val refresh = cachedRefreshToken
         if (refresh.isBlank()) return@withContext null
         when (val res = authenticateAndFetchDevices("", "", "", refresh)) {
@@ -361,10 +369,60 @@ object RingCloudClient {
     }
 
     suspend fun fetchDeviceSnapshotWithMeta(doorbotId: Long): RingFrame? = withContext(Dispatchers.IO) {
-        val accessToken = ensureValidAccessToken() ?: return@withContext null
+        var accessToken = ensureValidAccessToken() ?: return@withContext snapshotCache[doorbotId]
         var ringServerTs = System.currentTimeMillis()
 
-        // 1. Check latest snapshot timestamp from Ring Cloud
+        // Helper interno para descargar snapshot intentando endpoints oficiales
+        suspend fun tryDownload(token: String): Pair<Bitmap?, Boolean> {
+            val now = System.currentTimeMillis()
+            var unauthorized = false
+            var downloadedBmp: Bitmap? = null
+
+            val endpoints = listOf(
+                "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now",
+                "https://app-snaps.ring.com/next/$doorbotId?_t=$now",
+                "https://api.ring.com/v1/devices/$doorbotId/media/image/download?_t=$now"
+            )
+
+            for (endpoint in endpoints) {
+                try {
+                    val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 3500
+                        readTimeout = 3500
+                        requestMethod = "GET"
+                        useCaches = false
+                        setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
+                        setRequestProperty("Pragma", "no-cache")
+                        setRequestProperty("Authorization", "Bearer $token")
+                        setRequestProperty("User-Agent", "android:com.ringapp")
+                        setRequestProperty("hardware_id", hardwareId)
+                        setRequestProperty("Accept", "image/jpeg, */*")
+                    }
+                    val code = conn.responseCode
+                    if (code == 401) {
+                        unauthorized = true
+                        conn.disconnect()
+                        break
+                    }
+                    if (code in 200..299) {
+                        val bytes = conn.inputStream.readBytes()
+                        conn.disconnect()
+                        if (bytes.isNotEmpty()) {
+                            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (decoded != null) {
+                                downloadedBmp = decoded
+                                break
+                            }
+                        }
+                    } else {
+                        conn.disconnect()
+                    }
+                } catch (_: Exception) {}
+            }
+            return Pair(downloadedBmp, unauthorized)
+        }
+
+        // 1. Obtener timestamp del snapshot si es posible
         try {
             val tsUrl = "https://api.ring.com/clients_api/snapshots/timestamps"
             val tsConn = (URL(tsUrl).openConnection() as HttpURLConnection).apply {
@@ -375,6 +433,7 @@ object RingCloudClient {
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("Authorization", "Bearer $accessToken")
                 setRequestProperty("User-Agent", "android:com.ringapp")
+                setRequestProperty("hardware_id", hardwareId)
                 val body = """{"doorbot_ids":[$doorbotId]}"""
                 outputStream.use { it.write(body.toByteArray()) }
             }
@@ -387,89 +446,27 @@ object RingCloudClient {
                 }
             }
             tsConn.disconnect()
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
 
-        val now = System.currentTimeMillis()
-        var bmp: Bitmap? = null
+        var (bmp, unauthorized) = tryDownload(accessToken)
 
-        // 1. Primary official mobile snapshot endpoint: https://api.ring.com/clients_api/snapshots/image/{device_id}
-        try {
-            val imageUrl = "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now"
-            val conn = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3500
-                readTimeout = 3500
-                requestMethod = "GET"
-                useCaches = false
-                setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
-                setRequestProperty("Pragma", "no-cache")
-                setRequestProperty("Authorization", "Bearer $accessToken")
-                setRequestProperty("User-Agent", "android:com.ringapp")
-            }
-            if (conn.responseCode in 200..299) {
-                val bytes = conn.inputStream.readBytes()
-                if (bytes.isNotEmpty()) {
-                    bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                }
-            }
-            conn.disconnect()
-        } catch (_: Exception) {
-        }
-
-        // 2. Try app-snaps endpoint: https://app-snaps.ring.com/next/{device_id}
-        if (bmp == null) {
-            try {
-                val appSnapsUrl = "https://app-snaps.ring.com/next/$doorbotId?_t=$now"
-                val snapConn = (URL(appSnapsUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 3500
-                    readTimeout = 3500
-                    requestMethod = "GET"
-                    useCaches = false
-                    setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
-                    setRequestProperty("Pragma", "no-cache")
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                    setRequestProperty("User-Agent", "android:com.ringapp")
-                }
-                if (snapConn.responseCode in 200..299) {
-                    val bytes = snapConn.inputStream.readBytes()
-                    if (bytes.isNotEmpty()) {
-                        bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    }
-                }
-                snapConn.disconnect()
-            } catch (_: Exception) {
-            }
-        }
-
-        // 3. Try official /v1/devices/{device_id}/media/image/download (Ring Media Service endpoint)
-        if (bmp == null) {
-            try {
-                val mediaUrl = "https://api.ring.com/v1/devices/$doorbotId/media/image/download?_t=$now"
-                val mediaConn = (URL(mediaUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 3500
-                    readTimeout = 3500
-                    requestMethod = "GET"
-                    useCaches = false
-                    setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
-                    setRequestProperty("Pragma", "no-cache")
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                    setRequestProperty("User-Agent", "android:com.ringapp")
-                }
-                if (mediaConn.responseCode in 200..299) {
-                    val bytes = mediaConn.inputStream.readBytes()
-                    if (bytes.isNotEmpty()) {
-                        bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    }
-                }
-                mediaConn.disconnect()
-            } catch (_: Exception) {
+        // Si el token expiró (401), forzar renovación con el refresh token y reintentar
+        if (unauthorized || (bmp == null && cachedAccessToken.isBlank())) {
+            invalidateAccessToken()
+            val freshToken = ensureValidAccessToken(forceRefresh = true)
+            if (freshToken != null && freshToken != accessToken) {
+                accessToken = freshToken
+                val retry = tryDownload(freshToken)
+                bmp = retry.first
             }
         }
 
         if (bmp != null) {
-            RingFrame(bitmap = bmp, ringTimestampMs = ringServerTs)
+            val frame = RingFrame(bitmap = bmp, ringTimestampMs = ringServerTs)
+            snapshotCache[doorbotId] = frame
+            frame
         } else {
-            null
+            snapshotCache[doorbotId]
         }
     }
 

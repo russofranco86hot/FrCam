@@ -18,7 +18,11 @@ object WearCameraStorage {
 
     private const val PREFS_NAME = "frcam_wear_prefs"
     private const val KEY_CAMERAS_JSON = "cameras_json"
+    private const val KEY_LAST_PHONE_IP = "last_phone_ip"
     private const val TAG = "WearCameraStorage"
+
+    var lastKnownPhoneIp: String? = null
+        private set
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -30,6 +34,7 @@ object WearCameraStorage {
 
     fun init(context: Context) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        lastKnownPhoneIp = prefs.getString(KEY_LAST_PHONE_IP, null)
         val raw = prefs.getString(KEY_CAMERAS_JSON, null)
         if (!raw.isNullOrBlank()) {
             try {
@@ -66,6 +71,18 @@ object WearCameraStorage {
         } catch (e: Exception) {
             Log.e(TAG, "Error parseando json recibido en reloj: ${e.message}", e)
             0
+        }
+    }
+
+    fun setLastPhoneIp(context: Context, ip: String) {
+        if (ip.isNotBlank() && ip != lastKnownPhoneIp) {
+            lastKnownPhoneIp = ip
+            try {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_LAST_PHONE_IP, ip)
+                    .apply()
+            } catch (_: Exception) {}
         }
     }
 }

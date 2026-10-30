@@ -276,6 +276,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                 if (reply.startsWith("FRCAM_SERVER_HTTP")) {
                     phoneIp = recvPacket.address.hostAddress
                     Log.d(TAG, "Celular encontrado via UDP en IP: $phoneIp")
+                    phoneIp?.let { WearCameraStorage.setLastPhoneIp(this@WearMainActivity, it) }
                 }
             }
         } catch (_: Exception) {}
@@ -321,6 +322,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                 if (json.isNotBlank()) {
                     val count = WearCameraStorage.saveJsonString(this@WearMainActivity, json)
                     if (count > 0) {
+                        WearCameraStorage.setLastPhoneIp(this@WearMainActivity, hostIp)
                         Log.d(TAG, "¡$count cámaras sincronizadas exitosamente por HTTP Wi-Fi desde $hostIp!")
                         runOnUiThread {
                             Toast.makeText(this@WearMainActivity, "¡$count cámaras sincronizadas por Wi-Fi!", Toast.LENGTH_SHORT).show()
