@@ -98,31 +98,33 @@ object PhoneWearSyncEngine {
                             if (firstLine.contains("/ring_snapshot")) {
                                 val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
                                 val id = idStr?.toLongOrNull() ?: 0L
-                                var frame = if (id > 0L) com.frcam.app.protocol.RingCloudClient.getCachedSnapshot(id) else null
-                                if (frame == null && id > 0L) {
-                                    frame = com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)
-                                }
-                                if (frame != null) {
-                                    val bos = java.io.ByteArrayOutputStream()
-                                    frame.bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, bos)
-                                    val imgBytes = bos.toByteArray()
-                                    val out = client.getOutputStream()
-                                    val header = "HTTP/1.1 200 OK\r\n" +
-                                            "Content-Type: image/jpeg\r\n" +
-                                            "Content-Length: ${imgBytes.size}\r\n" +
-                                            "Connection: close\r\n\r\n"
-                                    out.write(header.toByteArray(Charsets.UTF_8))
-                                    out.write(imgBytes)
-                                    out.flush()
-                                    client.close()
-                                    // Trigger async pre-fetch for upcoming requests
-                                    CoroutineScope(Dispatchers.IO).launch {
-                                        try {
-                                            com.frcam.app.protocol.RingCloudClient.triggerSnapshotUpdate(id)
-                                            com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)
-                                        } catch (_: Exception) {}
+                                if (id > 0L) {
+                                    val liveBmp = com.frcam.app.protocol.RingCloudClient.getLiveFrame(id)
+                                    val bmp = liveBmp ?: com.frcam.app.protocol.RingCloudClient.getCachedSnapshot(id)?.bitmap
+                                        ?: com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)?.bitmap
+                                    if (bmp != null) {
+                                        val bos = java.io.ByteArrayOutputStream()
+                                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, bos)
+                                        val imgBytes = bos.toByteArray()
+                                        val out = client.getOutputStream()
+                                        val header = "HTTP/1.1 200 OK\r\n" +
+                                                "Content-Type: image/jpeg\r\n" +
+                                                "Content-Length: ${imgBytes.size}\r\n" +
+                                                "Connection: close\r\n\r\n"
+                                        out.write(header.toByteArray(Charsets.UTF_8))
+                                        out.write(imgBytes)
+                                        out.flush()
+                                        client.close()
+                                        if (liveBmp == null) {
+                                            CoroutineScope(Dispatchers.IO).launch {
+                                                try {
+                                                    com.frcam.app.protocol.RingCloudClient.triggerSnapshotUpdate(id)
+                                                    com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)
+                                                } catch (_: Exception) {}
+                                            }
+                                        }
+                                        return@launch
                                     }
-                                    return@launch
                                 } else {
                                     val out = client.getOutputStream()
                                     val header = "HTTP/1.1 404 Not Found\r\n" +

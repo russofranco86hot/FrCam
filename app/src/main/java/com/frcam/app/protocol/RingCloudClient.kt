@@ -45,6 +45,7 @@ object RingCloudClient {
     private var cachedRefreshToken: String = ""
 
     private val snapshotCache = java.util.concurrent.ConcurrentHashMap<Long, RingFrame>()
+    private val liveFrameCache = java.util.concurrent.ConcurrentHashMap<Long, Bitmap>()
 
     fun getActiveAccessToken(): String = cachedAccessToken
     fun getActiveToken(): String = cachedAccessToken.ifBlank { cachedRefreshToken }
@@ -52,6 +53,13 @@ object RingCloudClient {
     fun invalidateAccessToken() {
         cachedAccessToken = ""
     }
+
+    fun updateLiveFrame(doorbotId: Long, bitmap: Bitmap) {
+        liveFrameCache[doorbotId] = bitmap
+        snapshotCache[doorbotId] = RingFrame(bitmap, System.currentTimeMillis())
+    }
+
+    fun getLiveFrame(doorbotId: Long): Bitmap? = liveFrameCache[doorbotId]
 
     fun getCachedSnapshot(doorbotId: Long): RingFrame? = snapshotCache[doorbotId]
 

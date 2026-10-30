@@ -725,7 +725,10 @@ private fun RingWebRtcLayer(
                         liveCb = { res -> mainHandler.post { currentOnLive(res) } },
                         statusCb = { s -> mainHandler.post { currentOnStatus(s) } },
                         failCb = { e -> mainHandler.post { currentOnError(e) } },
-                        frameCb = { bmp -> mainHandler.post { currentOnFrame(bmp) } }
+                        frameCb = { bmp ->
+                            RingCloudClient.updateLiveFrame(doorbotId, bmp)
+                            mainHandler.post { currentOnFrame(bmp) }
+                        }
                     ),
                     "AndroidRing"
                 )

@@ -310,9 +310,7 @@ fun WearSingleCameraFullscreen(
                     // Botón Sonido / Parlante (Mute / Unmute)
                     IconButton(
                         onClick = {
-                            val nextMuted = !isMuted
-                            isMuted = nextMuted
-                            WearRingWebRtcController.setSpeakerMuted(nextMuted)
+                            isMuted = !isMuted
                         },
                         modifier = Modifier
                             .size(34.dp)

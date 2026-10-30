@@ -349,17 +349,10 @@ class WearIntercomBroadcaster(private val context: Context) {
         val supportsTalk = camera.isV380NativeProtocol() ||
             camera.brand == CameraBrand.EYE4_VSTARCAM ||
             camera.brand == CameraBrand.HIKVISION ||
-            camera.brand == CameraBrand.DAHUA ||
-            camera.brand == CameraBrand.RING_CLOUD
+            camera.brand == CameraBrand.DAHUA
 
         if (!supportsTalk) {
-            onError("La cámara ${camera.brand.displayName} no admite retorno de audio.")
-            return
-        }
-
-        if (camera.brand == CameraBrand.RING_CLOUD) {
-            _isBroadcasting.value = true
-            WearRingWebRtcController.setMicrophoneEnabled(camera.id, true)
+            onError("La cámara ${camera.brand.displayName} no admite retorno de audio en el reloj.")
             return
         }
 
@@ -434,7 +427,6 @@ class WearIntercomBroadcaster(private val context: Context) {
 
     fun stopBroadcasting() {
         _isBroadcasting.value = false
-        WearRingWebRtcController.setMicrophoneEnabled(null, false)
         recordJob?.cancel()
         recordJob = null
         try {
