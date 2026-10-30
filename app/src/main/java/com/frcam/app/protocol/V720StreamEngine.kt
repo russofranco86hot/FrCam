@@ -7,6 +7,9 @@ import com.frcam.app.model.CameraConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -74,11 +77,19 @@ object V720StreamEngine {
             }
         }
 
-        // 2. Probar protocolo propietario Naxclow UDP/TCP en puerto 6123 / 10002
+        // 2. Probar protocolo propietario Naxclow UDP/TCP en puerto 6123 / 10002 / 20190
         val udpSuccess = tryUdpP2pStream(host, cleanDevId, localIp, onFrame)
         if (udpSuccess) {
             Log.d(TAG, "Stream V720 completado vía UDP P2P")
             return@withContext
+        }
+
+        // 3. Si falló y la IP pudo haber cambiado por DHCP, re-descubrir de forma activa
+        val reResolved = resolveV720IpDirectly()
+        if (!reResolved.isNullOrBlank() && reResolved != host) {
+            Log.d(TAG, "Reintentando stream V720 con nueva IP resuelta: $reResolved")
+            if (tryHttpStream(reResolved, camera.httpPort, onFrame)) return@withContext
+            if (tryUdpP2pStream(reResolved, cleanDevId, localIp, onFrame)) return@withContext
         }
 
         onError("No se pudo iniciar video V720. Verifica que la cámara esté encendida con luz azul fija en la misma red Wi-Fi.")
@@ -90,14 +101,14 @@ object V720StreamEngine {
         onFrame: (Bitmap) -> Unit
     ): Boolean {
         if (host.isBlank()) return false
-        val portsToCheck = listOf(defaultPort, 80, 8080, 20190, 81, 6123, 8888, 5000).distinct()
+        val portsToCheck = listOf(defaultPort, 80, 8080, 20190, 81, 6123, 8888, 5000, 32108).distinct()
         val pathsToCheck = listOf(
             "/video", "/stream", "/cam.mjpg", "/live.mjpg", "/mjpeg/1",
-            "/snapshot", "/jpg/image.jpg", "/live", "/stream.mjpg", "/snapshot.jpg", "/"
+            "/snapshot", "/jpg/image.jpg", "/image.jpg", "/live", "/stream.mjpg", "/snapshot.jpg", "/capture", "/"
         )
 
         for (port in portsToCheck) {
-            if (!isTcpPortOpen(host, port, 300)) continue
+            if (!isTcpPortOpen(host, port, 250)) continue
             for (path in pathsToCheck) {
                 val urlStr = "http://$host:$port$path"
                 var conn: HttpURLConnection? = null
@@ -111,8 +122,7 @@ object V720StreamEngine {
                     }
                     val code = conn.responseCode
                     val contentType = conn.contentType.orEmpty().lowercase()
-                    if (code in 200..299 && (contentType.contains("multipart") || contentType.contains("image") || contentType.contains("video") || contentType.contains("octet"))) {
-                        Log.d(TAG, "HTTP V720 activo en $urlStr ($contentType)")
+                    if (code in 200..299 || code == 401) {
                         val inStream = BufferedInputStream(conn.inputStream, 16384)
                         val buf = ByteArrayOutputStream(65536)
                         var prevByte = -1
@@ -147,6 +157,19 @@ object V720StreamEngine {
                             }
                             prevByte = b
                         }
+
+                        // Si entregó un frame de snapshot pero el socket cerró, mantener bucle de snapshots a ~10fps
+                        if (frameCount > 0 && coroutineContext.isActive) {
+                            Log.d(TAG, "Cámara V720 en bucle continuo de snapshots HTTP en $urlStr")
+                            while (coroutineContext.isActive) {
+                                delay(90L)
+                                val snapBmp = fetchHttpSnapshot(urlStr)
+                                if (snapBmp != null) {
+                                    onFrame(snapBmp)
+                                }
+                            }
+                            return true
+                        }
                         if (frameCount > 0) return true
                     }
                 } catch (_: Exception) {
@@ -156,6 +179,27 @@ object V720StreamEngine {
             }
         }
         return false
+    }
+
+    private fun fetchHttpSnapshot(urlStr: String): Bitmap? {
+        return try {
+            val c = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 800
+                readTimeout = 1200
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "FrCam/1.0")
+            }
+            if (c.responseCode in 200..299) {
+                val bytes = c.inputStream.use { it.readBytes() }
+                c.disconnect()
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            } else {
+                c.disconnect()
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private suspend fun tryUdpP2pStream(
@@ -191,6 +235,10 @@ object V720StreamEngine {
             // A) Enviar probes por UDP a la cámara y por broadcast
             val targetIps = mutableListOf<String>()
             if (host.isNotBlank() && host != "127.0.0.1") targetIps.add(host)
+            val subnetPrefix = localIp.substringBeforeLast(".")
+            if (subnetPrefix.isNotBlank()) {
+                targetIps.add("$subnetPrefix.255")
+            }
             targetIps.add("255.255.255.255")
             targetIps.add("192.168.169.1")
 
@@ -417,7 +465,7 @@ object V720StreamEngine {
         }
     }
 
-    private fun getArpTable(): Map<String, String> {
+    fun getArpTable(): Map<String, String> {
         val map = mutableMapOf<String, String>()
         try {
             java.io.File("/proc/net/arp").forEachLine { line ->
@@ -438,62 +486,39 @@ object V720StreamEngine {
         val localIp = getLocalIpv4Address() ?: return@withContext null
         val subnetPrefix = localIp.substringBeforeLast(".")
 
-        // 1. Broadcast UDP {"code":50}
-        try {
-            DatagramSocket().use { socket ->
-                socket.broadcast = true
-                socket.soTimeout = 300
-                val broadcastAddr = InetAddress.getByName("255.255.255.255")
-                val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
-                for (p in listOf(20190, 6123, 10002, 10003, 32108)) {
-                    socket.send(DatagramPacket(probe, probe.size, broadcastAddr, p))
-                }
-                val buf = ByteArray(1024)
-                val pack = DatagramPacket(buf, buf.size)
-                socket.receive(pack)
-                val ip = pack.address?.hostAddress
-                if (!ip.isNullOrBlank() && ip != localIp) return@withContext ip
-            }
-        } catch (_: Exception) {}
+        // 1. Probar descubrimiento rápido vía broadcast UDP multi-probe
+        val udpDevices = NetworkCameraScanner.discoverV720ViaUdpBroadcast()
+        if (udpDevices.isNotEmpty()) {
+            val ip = udpDevices.first().ipAddress
+            Log.d(TAG, "IP V720 resuelta directamente vía UDP broadcast: $ip")
+            return@withContext ip
+        }
 
         // 2. Consulta de tabla ARP local
         val arp = getArpTable()
         for ((ip, _) in arp) {
             if (ip.startsWith(subnetPrefix) && ip != localIp && !ip.endsWith(".1") && !ip.endsWith(".254")) {
-                for (p in listOf(20190, 20023, 6123, 10002, 8080, 80)) {
-                    if (isTcpPortOpen(ip, p, 100)) return@withContext ip
+                for (p in listOf(20190, 20023, 6123, 10002, 8080, 80, 554)) {
+                    if (isTcpPortOpen(ip, p, 120)) return@withContext ip
                 }
             }
         }
 
-        // 3. Probar IPs de la subred concurrentemente
-        val ports = listOf(20190, 20023, 80, 8080, 554, 81, 6123, 10002)
-        val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
+        // 3. Probar IPs de la subred concurrentemente con Semaphore(20) para prevenir EMFILE
+        val ports = listOf(20190, 20023, 80, 8080, 554, 81, 6123, 10002, 32108)
+        val semaphore = Semaphore(20)
         val found = coroutineScope {
             (1..254).map { octet ->
                 async {
                     val ip = "$subnetPrefix.$octet"
                     if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) return@async null
 
-                    // UDP 20190 y 6123
-                    try {
-                        DatagramSocket().use { socket ->
-                            socket.soTimeout = 80
-                            val target = InetAddress.getByName(ip)
-                            socket.send(DatagramPacket(probe, probe.size, target, 20190))
-                            socket.send(DatagramPacket(probe, probe.size, target, 6123))
-                            val buf = ByteArray(256)
-                            val pack = DatagramPacket(buf, buf.size)
-                            socket.receive(pack)
-                            return@async ip
+                    semaphore.withPermit {
+                        for (p in ports) {
+                            if (isTcpPortOpen(ip, p, 150)) return@withPermit ip
                         }
-                    } catch (_: Exception) {}
-
-                    // TCP ports
-                    for (p in ports) {
-                        if (isTcpPortOpen(ip, p, 80)) return@async ip
+                        null
                     }
-                    null
                 }
             }.awaitAll().filterNotNull().firstOrNull()
         }

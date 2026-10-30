@@ -185,7 +185,7 @@ object NetworkCameraScanner {
                             }
 
                             val isCameraCandidate = openPorts.any {
-                                it in listOf(10554, 10080, 8800, 8899, 6123, 16123, 10002, 10003, 10000, 554, 8554, 2020, 8000, 81, 6600, 6001, 8001, 9988, 37777, 34567, 8081, 88, 7070, 8888, 8088, 5000)
+                                it in listOf(20190, 20023, 32108, 10554, 10080, 8800, 8899, 6123, 16123, 10002, 10003, 10000, 554, 8554, 2020, 8000, 81, 6600, 6001, 8001, 9988, 37777, 34567, 8081, 88, 7070, 8888, 8088, 5000)
                             } || openPorts.contains(8080) || openPorts.contains(80)
 
                             if (isCameraCandidate) {
@@ -273,11 +273,19 @@ object NetworkCameraScanner {
 
     fun discoverV720ViaUdpBroadcast(): List<DiscoveredCameraDevice> {
         val found = mutableListOf<DiscoveredCameraDevice>()
+        val localIp = getLocalIpv4Address()
+        val subnetPrefix = localIp?.substringBeforeLast(".").orEmpty()
+
         try {
             DatagramSocket().use { socket ->
                 socket.broadcast = true
-                socket.soTimeout = 400
-                val broadcastAddr = InetAddress.getByName("255.255.255.255")
+                socket.soTimeout = 300
+                val targets = mutableListOf<InetAddress>()
+                try { targets.add(InetAddress.getByName("255.255.255.255")) } catch (_: Exception) {}
+                if (subnetPrefix.isNotBlank()) {
+                    try { targets.add(InetAddress.getByName("$subnetPrefix.255")) } catch (_: Exception) {}
+                }
+
                 val probePayloads = listOf(
                     "{\"code\":50}".toByteArray(Charsets.UTF_8),
                     "{\"code\":10}".toByteArray(Charsets.UTF_8),
@@ -287,22 +295,42 @@ object NetworkCameraScanner {
                     byteArrayOf(0x00, 0x00, 0x00, 0x00)
                 )
                 val targetPorts = listOf(20190, 6123, 10002, 10003, 16123, 6600, 32108)
-                for (port in targetPorts) {
-                    for (payload in probePayloads) {
+
+                // 1. Enviar ráfaga a broadcasts
+                for (dest in targets) {
+                    for (port in targetPorts) {
+                        for (payload in probePayloads) {
+                            try {
+                                val packet = DatagramPacket(payload, payload.size, dest, port)
+                                socket.send(packet)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+
+                // 2. Enviar probe50 unicast por toda la subred usando el mismo socket único
+                if (subnetPrefix.isNotBlank()) {
+                    val p50 = "{\"code\":50}".toByteArray(Charsets.UTF_8)
+                    for (octet in 1..254) {
+                        val ip = "$subnetPrefix.$octet"
+                        if (ip == localIp) continue
                         try {
-                            val packet = DatagramPacket(payload, payload.size, broadcastAddr, port)
-                            socket.send(packet)
+                            val addr = InetAddress.getByName(ip)
+                            for (port in listOf(20190, 6123, 10002, 32108)) {
+                                socket.send(DatagramPacket(p50, p50.size, addr, port))
+                            }
                         } catch (_: Exception) {}
                     }
                 }
+
                 val buf = ByteArray(2048)
-                val deadline = System.currentTimeMillis() + 800L
+                val deadline = System.currentTimeMillis() + 1200L
                 while (System.currentTimeMillis() < deadline) {
                     try {
                         val recv = DatagramPacket(buf, buf.size)
                         socket.receive(recv)
                         val ip = recv.address?.hostAddress ?: continue
-                        if (found.none { it.ipAddress == ip }) {
+                        if (ip != localIp && found.none { it.ipAddress == ip }) {
                             val recvPort = recv.port
                             val text = String(buf, 0, recv.length, Charsets.UTF_8)
                             val devId = if (text.contains("\"devTarget\"")) {
@@ -325,6 +353,8 @@ object NetworkCameraScanner {
                                 )
                             )
                         }
+                    } catch (_: java.net.SocketTimeoutException) {
+                        if (System.currentTimeMillis() >= deadline) break
                     } catch (_: Exception) {
                         break
                     }
@@ -373,7 +403,8 @@ object NetworkCameraScanner {
                 val readCount = inStream.read(buffer)
                 if (readCount <= 0) return false
                 val resp = String(buffer, 0, readCount, Charsets.UTF_8).lowercase()
-                resp.contains("ipcam") ||
+                resp.startsWith("http/") ||
+                    resp.contains("ipcam") ||
                     resp.contains("onvif") ||
                     resp.contains("vstarcam") ||
                     resp.contains("eye4") ||
@@ -383,14 +414,14 @@ object NetworkCameraScanner {
                     resp.contains("dahua") ||
                     resp.contains("mjpeg") ||
                     resp.contains("camera") ||
-                    resp.contains("realm=\"ip") ||
-                    resp.contains("realm=\"cam") ||
-                    resp.contains("realm=\"v720") ||
-                    resp.contains("video/x-motion-jpeg") ||
-                    resp.contains("multipart/x-mixed-replace") ||
-                    resp.contains("live.mjpg") ||
+                    resp.contains("realm=") ||
+                    resp.contains("server:") ||
+                    resp.contains("video/") ||
+                    resp.contains("image/") ||
+                    resp.contains("multipart/") ||
+                    resp.contains("live") ||
                     resp.contains("snapshot") ||
-                    resp.contains("server: rt-thread") ||
+                    resp.contains("rt-thread") ||
                     resp.contains("beken") ||
                     resp.contains("webcam")
             }

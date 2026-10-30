@@ -37,6 +37,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.util.UUID
 
 data class DiscoveredBleCamera(
@@ -546,7 +548,7 @@ object BluetoothCameraEngine {
             }
         }
 
-        // 2. Búsqueda por Broadcast UDP
+        // 2. Búsqueda por Broadcast UDP multi-probe (broadcast dirigido + broadcast global + unicast subred)
         val udpDevices = NetworkCameraScanner.discoverV720ViaUdpBroadcast()
         if (udpDevices.isNotEmpty()) {
             val ip = udpDevices.first().ipAddress
@@ -554,43 +556,39 @@ object BluetoothCameraEngine {
             return@withContext ip
         }
 
-        // 3. Barrido concurrente de la subred local (UDP {"code":50} y puertos propietarios V720 / HTTP / RTSP)
+        // 3. Consulta de tabla ARP local antes del escaneo
         val localIp = NetworkCameraScanner.getLocalIpv4Address()
         val subnetPrefix = localIp?.substringBeforeLast(".").orEmpty()
         if (subnetPrefix.isNotBlank()) {
-            val v720Ports = listOf(20190, 20023, 80, 8080, 554, 81, 6123, 10002, 10003, 16123, 8554, 8888, 5000, 6600, 32108)
-            val probeData = """{"code":50}""".toByteArray(Charsets.UTF_8)
+            val arp = V720StreamEngine.getArpTable()
+            for ((ip, _) in arp) {
+                if (ip.startsWith(subnetPrefix) && ip != localIp && !ip.endsWith(".1") && !ip.endsWith(".254")) {
+                    for (p in listOf(20190, 20023, 6123, 10002, 8080, 80, 554)) {
+                        if (NetworkCameraScanner.isTcpPortOpen(ip, p, 120)) {
+                            Log.d(TAG, "Cámara V720 encontrada en tabla ARP: $ip:$p")
+                            return@withContext ip
+                        }
+                    }
+                }
+            }
+
+            // 4. Barrido concurrente controlado (Semaphore = 20) para evitar colapso de descriptores de archivo (EMFILE)
+            val v720Ports = listOf(20190, 20023, 6123, 10002, 8080, 80, 554, 81, 10003, 16123, 8888, 5000, 32108)
+            val semaphore = Semaphore(20)
             val foundIp = coroutineScope {
                 (1..254).map { octet ->
                     async {
                         val ip = "$subnetPrefix.$octet"
                         if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) return@async null
 
-                        // 3a. Probe UDP ultrarrápido {"code":50}
-                        try {
-                            java.net.DatagramSocket().use { sock ->
-                                sock.soTimeout = 120
-                                val target = java.net.InetAddress.getByName(ip)
-                                sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 20190))
-                                sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 6123))
-                                sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 10002))
-                                val rBuf = ByteArray(512)
-                                val rPack = java.net.DatagramPacket(rBuf, rBuf.size)
-                                sock.receive(rPack)
-                                val rText = String(rBuf, 0, rPack.length, Charsets.UTF_8)
-                                if (rText.contains("\"code\"") || rPack.length > 0) {
-                                    return@async ip
+                        semaphore.withPermit {
+                            for (port in v720Ports) {
+                                if (NetworkCameraScanner.isTcpPortOpen(ip, port, timeoutMs = 160)) {
+                                    return@withPermit ip
                                 }
                             }
-                        } catch (_: Exception) {}
-
-                        // 3b. Probe TCP en puertos V720 / HTTP / RTSP
-                        for (port in v720Ports) {
-                            if (NetworkCameraScanner.isTcpPortOpen(ip, port, timeoutMs = 150)) {
-                                return@async ip
-                            }
+                            null
                         }
-                        null
                     }
                 }.awaitAll().filterNotNull().firstOrNull()
             }
@@ -600,11 +598,12 @@ object BluetoothCameraEngine {
             }
         }
 
-        // 4. Verificación de modo AP (únicamente si el teléfono está en esa subred AP)
+        // 5. Verificación de modo AP (únicamente si el teléfono está en esa subred AP)
         if (localIp?.startsWith("192.168.169.") == true || localIp?.startsWith("192.168.4.") == true) {
             for (apIp in listOf("192.168.169.1", "192.168.4.1")) {
                 if (NetworkCameraScanner.isTcpPortOpen(apIp, 80, 250) ||
                     NetworkCameraScanner.isTcpPortOpen(apIp, 6123, 250) ||
+                    NetworkCameraScanner.isTcpPortOpen(apIp, 20190, 250) ||
                     NetworkCameraScanner.isTcpPortOpen(apIp, 10002, 250) ||
                     NetworkCameraScanner.isTcpPortOpen(apIp, 8080, 250)
                 ) {

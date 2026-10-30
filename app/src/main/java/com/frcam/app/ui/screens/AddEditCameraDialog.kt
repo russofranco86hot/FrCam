@@ -1456,7 +1456,7 @@ fun LanDiscoveryDialog(
                                                     }
                                                 }
                                                 Text(
-                                                    text = "💡 Si la luz azul ya está FIJA, la cámara ya tiene Wi-Fi: pulsa 'Buscar IP'. También puedes ver su IP exacta en la app oficial V720 (Ajustes > Info del dispositivo) y escribirla aquí.",
+                                                    text = "💡 Si la luz azul ya está FIJA, la cámara ya tiene Wi-Fi: pulsa 'Buscar IP' para que FrCam la detecte y configure automáticamente.",
                                                     fontSize = 10.sp,
                                                     color = Color(0xFF38BDF8),
                                                     modifier = Modifier.padding(vertical = 4.dp)
