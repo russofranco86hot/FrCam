@@ -45,6 +45,7 @@ object RingCloudClient {
     private var cachedRefreshToken: String = ""
 
     fun getActiveAccessToken(): String = cachedAccessToken
+    fun getActiveToken(): String = cachedAccessToken.ifBlank { cachedRefreshToken }
 
     fun setSavedRefreshToken(token: String) {
         if (token.isNotBlank()) {

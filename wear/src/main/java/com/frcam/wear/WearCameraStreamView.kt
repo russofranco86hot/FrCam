@@ -12,17 +12,24 @@ import androidx.annotation.OptIn
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,7 +39,10 @@ import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -43,6 +53,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
+import com.frcam.app.model.ConnectionMode
 import com.frcam.app.model.StreamProtocol
 import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.Dispatchers
@@ -57,7 +68,8 @@ import java.net.URL
 /**
  * Reproductor de video ultraliviano para Wear OS.
  * Soporta cámaras V380 Pro nativo (con audio G.711A), Ring Cloud snapshots,
- * cámaras V720/MJPEG y flujos RTSP/ONVIF estándar con ExoPlayer y control de sonido.
+ * cámaras V720/MJPEG y flujos RTSP/ONVIF estándar con ExoPlayer, reintentos automáticos
+ * y toque para reconectar.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -71,6 +83,7 @@ fun WearCameraStreamView(
     var isConnecting by remember(camera.id) { mutableStateOf(true) }
     var errorMessage by remember(camera.id) { mutableStateOf<String?>(null) }
     var currentBitmap by remember(camera.id) { mutableStateOf<Bitmap?>(null) }
+    var retryKey by remember(camera.id) { mutableIntStateOf(0) }
 
     val isV380 = camera.isV380NativeProtocol()
     val isRing = camera.brand == CameraBrand.RING_CLOUD
@@ -86,13 +99,23 @@ fun WearCameraStreamView(
         modifier = modifier
             .fillMaxSize()
             .background(ComposeColor.Black)
-            .then(if (onTap != null) Modifier.clickable { onTap() } else Modifier),
+            .then(
+                if (errorMessage != null) {
+                    Modifier.clickable {
+                        errorMessage = null
+                        isConnecting = true
+                        retryKey++
+                    }
+                } else if (onTap != null) {
+                    Modifier.clickable { onTap() }
+                } else Modifier
+            ),
         contentAlignment = Alignment.Center
     ) {
         when {
             // 1. Cámaras Ring Cloud (captura de snapshots periódicos de alta eficiencia)
             isRing -> {
-                LaunchedEffect(camera.id) {
+                LaunchedEffect(camera.id, retryKey) {
                     isConnecting = true
                     errorMessage = null
                     val token = camera.password.trim()
@@ -102,26 +125,51 @@ fun WearCameraStreamView(
                     while (isActive) {
                         try {
                             val bmp = withContext(Dispatchers.IO) {
+                                // Opción A: URL directa
                                 if (!snapUrl.isNullOrBlank()) {
-                                    BitmapFactory.decodeStream(URL(snapUrl).openStream())
-                                } else if (doorbotId > 0L && token.isNotBlank()) {
-                                    val conn = (URL("https://api.ring.com/clients_api/doorbots/$doorbotId/snapshot")
-                                        .openConnection() as HttpURLConnection).apply {
-                                        connectTimeout = 4000
-                                        readTimeout = 4000
-                                        setRequestProperty("Authorization", "Bearer $token")
-                                        setRequestProperty("User-Agent", "android:com.ringapp")
-                                    }
-                                    if (conn.responseCode in 200..299) {
-                                        conn.inputStream.use { BitmapFactory.decodeStream(it) }
-                                    } else {
-                                        conn.disconnect()
-                                        null
-                                    }
-                                } else {
-                                    null
+                                    try {
+                                        return@withContext BitmapFactory.decodeStream(URL(snapUrl).openStream())
+                                    } catch (_: Exception) {}
                                 }
+
+                                // Opción B: Directo a Ring Cloud API con Bearer token
+                                if (doorbotId > 0L && token.isNotBlank()) {
+                                    try {
+                                        val conn = (URL("https://api.ring.com/clients_api/doorbots/$doorbotId/snapshot")
+                                            .openConnection() as HttpURLConnection).apply {
+                                            connectTimeout = 4000
+                                            readTimeout = 4000
+                                            setRequestProperty("Authorization", "Bearer $token")
+                                            setRequestProperty("User-Agent", "android:com.ringapp")
+                                        }
+                                        if (conn.responseCode in 200..299) {
+                                            return@withContext conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                                        } else {
+                                            conn.disconnect()
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+
+                                // Opción C: Consultar servidor local del celular en LAN (puerto 49880)
+                                if (doorbotId > 0L && camera.host.isNotBlank() && !camera.host.endsWith(".")) {
+                                    try {
+                                        val cleanHost = camera.host.trim().removePrefix("http://").substringBefore(":")
+                                        val conn = (URL("http://$cleanHost:49880/ring_snapshot?id=$doorbotId")
+                                            .openConnection() as HttpURLConnection).apply {
+                                            connectTimeout = 2500
+                                            readTimeout = 2500
+                                        }
+                                        if (conn.responseCode in 200..299) {
+                                            return@withContext conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                                        } else {
+                                            conn.disconnect()
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+
+                                null
                             }
+
                             if (bmp != null) {
                                 currentBitmap = bmp
                                 isConnecting = false
@@ -131,7 +179,7 @@ fun WearCameraStreamView(
                             }
                         } catch (e: Exception) {
                             if (currentBitmap == null) {
-                                errorMessage = e.message
+                                errorMessage = e.message ?: "Error conectando con Ring"
                             }
                         }
                         delay(2500L)
@@ -148,7 +196,7 @@ fun WearCameraStreamView(
                 }
             }
 
-            // 2. Cámaras V380 Pro Nativo (decodificación por hardware MediaCodec + TextureView + AudioTrack G.711A)
+            // 2. Cámaras V380 Pro Nativo (MediaCodec + AudioTrack G.711A)
             isV380 -> {
                 var activeSurface by remember { mutableStateOf<Surface?>(null) }
                 val audioPlayer = remember { WearCameraAudioPlayer(8000) }
@@ -183,7 +231,7 @@ fun WearCameraStreamView(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                LaunchedEffect(camera.id, camera.host, camera.password, activeSurface) {
+                LaunchedEffect(camera.id, camera.host, camera.password, activeSurface, retryKey) {
                     val surface = activeSurface ?: return@LaunchedEffect
                     if (!surface.isValid) return@LaunchedEffect
 
@@ -216,6 +264,9 @@ fun WearCameraStreamView(
                     }
 
                     try {
+                        val preferCloud = camera.connectionMode == ConnectionMode.CLOUD_DEVICE_ID ||
+                            (camera.deviceId.isNotBlank() && (camera.host.isBlank() || camera.host == "0.0.0.0"))
+
                         V380NativeProtocol.runLiveStreamSession(
                             cameraId = camera.id,
                             deviceIdStr = camera.deviceId,
@@ -223,7 +274,7 @@ fun WearCameraStreamView(
                             port = camera.rtspPort,
                             username = camera.username,
                             password = camera.password,
-                            preferCloud = camera.deviceId.isNotBlank() && (camera.host.isBlank() || camera.host == "0.0.0.0"),
+                            preferCloud = preferCloud,
                             hdQuality = false,
                             scope = this,
                             onStatus = {},
@@ -267,9 +318,9 @@ fun WearCameraStreamView(
                 }
             }
 
-            // 3. Cámaras V720 / Naxclow y flujos HTTP MJPEG (decodificación directa por frames JPEG)
+            // 3. Cámaras V720 / Naxclow y flujos HTTP MJPEG
             isMjpeg -> {
-                LaunchedEffect(camera.id, camera.host) {
+                LaunchedEffect(camera.id, camera.host, retryKey) {
                     isConnecting = true
                     errorMessage = null
                     val candidateUrls = camera.buildCandidateUrls(useSubStream = true)
@@ -346,10 +397,12 @@ fun WearCameraStreamView(
                 }
             }
 
-            // 4. Cámaras estándar RTSP / ONVIF / Hikvision / Dahua / Eye4 via ExoPlayer
+            // 4. Cámaras estándar RTSP / ONVIF con rotación de URLs candidatas
             else -> {
                 var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
                 var playerRef by remember { mutableStateOf<ExoPlayer?>(null) }
+                val candidateUrls = remember(camera) { camera.buildCandidateUrls(useSubStream = true) }
+                var candidateIndex by remember(camera.id, retryKey) { mutableIntStateOf(0) }
 
                 AndroidView(
                     factory = { ctx ->
@@ -364,7 +417,7 @@ fun WearCameraStreamView(
                     playerRef?.volume = if (isMuted) 0f else 1f
                 }
 
-                DisposableEffect(camera.id) {
+                DisposableEffect(camera.id, retryKey) {
                     val loadControl = DefaultLoadControl.Builder()
                         .setBufferDurationsMs(400, 1200, 250, 400)
                         .setPrioritizeTimeOverSizeThresholds(true)
@@ -382,19 +435,26 @@ fun WearCameraStreamView(
                     player.volume = if (isMuted) 0f else 1f
                     player.playWhenReady = true
 
-                    val url = camera.buildStreamUrl(useSubStream = true)
-                    val mediaItem = MediaItem.fromUri(url)
-
-                    if (url.startsWith("rtsp://", ignoreCase = true)) {
-                        val mediaSource = RtspMediaSource.Factory()
-                            .setForceUseRtpTcp(true)
-                            .createMediaSource(mediaItem)
-                        player.setMediaSource(mediaSource)
-                    } else {
-                        player.setMediaItem(mediaItem)
+                    fun playCandidate(index: Int) {
+                        if (index !in candidateUrls.indices) {
+                            errorMessage = "Sin señal de video"
+                            isConnecting = false
+                            return
+                        }
+                        val url = candidateUrls[index]
+                        val mediaItem = MediaItem.fromUri(url)
+                        if (url.startsWith("rtsp://", ignoreCase = true)) {
+                            val mediaSource = RtspMediaSource.Factory()
+                                .setForceUseRtpTcp(true)
+                                .createMediaSource(mediaItem)
+                            player.setMediaSource(mediaSource)
+                        } else {
+                            player.setMediaItem(mediaItem)
+                        }
+                        player.prepare()
                     }
 
-                    player.prepare()
+                    playCandidate(candidateIndex)
 
                     val listener = object : Player.Listener {
                         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -405,8 +465,13 @@ fun WearCameraStreamView(
                         }
 
                         override fun onPlayerError(error: PlaybackException) {
-                            errorMessage = "Error de conexión"
-                            isConnecting = false
+                            if (candidateIndex + 1 < candidateUrls.size) {
+                                candidateIndex++
+                                playCandidate(candidateIndex)
+                            } else {
+                                errorMessage = "Error de conexión"
+                                isConnecting = false
+                            }
                         }
                     }
                     player.addListener(listener)
@@ -429,20 +494,34 @@ fun WearCameraStreamView(
             )
         }
 
-        // Overlay de error
+        // Overlay de reconexión / error con botón de toque
         if (errorMessage != null && currentBitmap == null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(ComposeColor(0xCC000000)),
+                    .background(ComposeColor(0xD9000000))
+                    .padding(8.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.VideocamOff,
-                    contentDescription = null,
-                    tint = ComposeColor(0xFF94A3B8),
-                    modifier = Modifier.size(28.dp)
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Reintentar",
+                        tint = ComposeColor(0xFF38BDF8),
+                        modifier = Modifier.size(26.dp)
+                    )
+                    Text(
+                        text = errorMessage ?: "Toca para reconectar",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ComposeColor(0xFFCBD5E1),
+                        textAlign = TextAlign.Center,
+                        maxLines = 2
+                    )
+                }
             }
         }
     }

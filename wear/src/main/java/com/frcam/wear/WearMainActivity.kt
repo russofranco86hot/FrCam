@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
@@ -76,6 +77,12 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             val cameras by WearCameraStorage.cameras.collectAsState()
             var mode by remember { mutableStateOf(WearDisplayMode.GRID) }
             var selectedCameraIndex by remember { mutableIntStateOf(0) }
+
+            // Gestionar el botón físico 'Atrás' en Wear OS:
+            // Si está en pantalla completa, vuelve a la cuadrícula. Solo sale si ya está en la cuadrícula.
+            BackHandler(enabled = mode == WearDisplayMode.FULLSCREEN) {
+                mode = WearDisplayMode.GRID
+            }
 
             Box(
                 modifier = Modifier

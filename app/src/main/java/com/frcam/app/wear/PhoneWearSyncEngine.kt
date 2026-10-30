@@ -67,7 +67,35 @@ object PhoneWearSyncEngine {
                             val firstLine = reader.readLine() ?: ""
                             Log.d(TAG, "Petición HTTP recibida desde ${client.inetAddress.hostAddress}: $firstLine")
 
-                            val cams = (cachedCameras.ifEmpty { getCameras() }).map { it.copy(liveInDashboard = true) }
+                            if (firstLine.contains("/ring_snapshot")) {
+                                val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
+                                val id = idStr?.toLongOrNull() ?: 0L
+                                val frame = if (id > 0L) com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id) else null
+                                if (frame != null) {
+                                    val bos = java.io.ByteArrayOutputStream()
+                                    frame.bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, bos)
+                                    val imgBytes = bos.toByteArray()
+                                    val out = client.getOutputStream()
+                                    val header = "HTTP/1.1 200 OK\r\n" +
+                                            "Content-Type: image/jpeg\r\n" +
+                                            "Content-Length: ${imgBytes.size}\r\n" +
+                                            "Connection: close\r\n\r\n"
+                                    out.write(header.toByteArray(Charsets.UTF_8))
+                                    out.write(imgBytes)
+                                    out.flush()
+                                    client.close()
+                                    return@launch
+                                }
+                            }
+
+                            val ringToken = com.frcam.app.protocol.RingCloudClient.getActiveToken()
+                            val cams = (cachedCameras.ifEmpty { getCameras() }).map { cam ->
+                                var updated = cam.copy(liveInDashboard = true)
+                                if (updated.brand == com.frcam.app.model.CameraBrand.RING_CLOUD && updated.password.isBlank() && ringToken.isNotBlank()) {
+                                    updated = updated.copy(password = ringToken)
+                                }
+                                updated
+                            }
                             val body = json.encodeToString(cams).toByteArray(Charsets.UTF_8)
 
                             val out = client.getOutputStream()
@@ -121,7 +149,14 @@ object PhoneWearSyncEngine {
      * Envía la lista completa de cámaras al reloj por todos los canales disponibles.
      */
     fun syncCamerasToWatch(context: Context, cameras: List<CameraConfig>, targetNodeId: String? = null) {
-        val activeCameras = cameras.map { it.copy(liveInDashboard = true) }
+        val ringToken = com.frcam.app.protocol.RingCloudClient.getActiveToken()
+        val activeCameras = cameras.map { cam ->
+            var updated = cam.copy(liveInDashboard = true)
+            if (updated.brand == com.frcam.app.model.CameraBrand.RING_CLOUD && updated.password.isBlank() && ringToken.isNotBlank()) {
+                updated = updated.copy(password = ringToken)
+            }
+            updated
+        }
         if (activeCameras.isNotEmpty()) {
             cachedCameras = activeCameras
         }
