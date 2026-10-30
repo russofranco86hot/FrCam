@@ -113,124 +113,13 @@ fun WearCameraStreamView(
         contentAlignment = Alignment.Center
     ) {
         when {
-            // 1. Cámaras Ring Cloud (captura de snapshots periódicos de alta eficiencia)
+            // 1. Cámaras Ring Cloud (Live WebRTC con video fluido, audio en vivo y micrófono)
             isRing -> {
-                LaunchedEffect(camera.id, retryKey) {
-                    isConnecting = true
-                    errorMessage = null
-                    val token = camera.password.trim()
-                    val snapUrl = camera.customStreamUrl.takeIf { it.startsWith("http") }
-                    val doorbotId = camera.deviceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
-                    val phoneHost = (WearCameraStorage.lastKnownPhoneIp ?: camera.remoteHost.ifBlank { camera.host })
-                        .trim().removePrefix("http://").substringBefore(":")
-
-                    while (isActive) {
-                        try {
-                            val bmp = withContext(Dispatchers.IO) {
-                                val now = System.currentTimeMillis()
-
-                                // Opción A: URL directa personalizada o proxy (e.g. http://$phoneIp:49880/ring_snapshot?id=...)
-                                if (!snapUrl.isNullOrBlank()) {
-                                    try {
-                                        val conn = (URL(snapUrl).openConnection() as HttpURLConnection).apply {
-                                            connectTimeout = 3000
-                                            readTimeout = 3000
-                                            setRequestProperty("Accept", "image/jpeg, */*")
-                                        }
-                                        if (conn.responseCode in 200..299) {
-                                            val bytes = conn.inputStream.readBytes()
-                                            conn.disconnect()
-                                            if (bytes.isNotEmpty()) {
-                                                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                if (decoded != null) return@withContext decoded
-                                            }
-                                        } else {
-                                            conn.disconnect()
-                                        }
-                                    } catch (_: Exception) {}
-                                }
-
-                                // Opción B: Consultar servidor local del celular en LAN (puerto 49880)
-                                if (doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
-                                    try {
-                                        val conn = (URL("http://$phoneHost:49880/ring_snapshot?id=$doorbotId")
-                                            .openConnection() as HttpURLConnection).apply {
-                                            connectTimeout = 2500
-                                            readTimeout = 2500
-                                            setRequestProperty("Accept", "image/jpeg, */*")
-                                        }
-                                        if (conn.responseCode in 200..299) {
-                                            val bytes = conn.inputStream.readBytes()
-                                            conn.disconnect()
-                                            if (bytes.isNotEmpty()) {
-                                                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                if (decoded != null) return@withContext decoded
-                                            }
-                                        } else {
-                                            conn.disconnect()
-                                        }
-                                    } catch (_: Exception) {}
-                                }
-
-                                // Opción C: Consultar endpoints oficiales de Ring Cloud con Bearer Token
-                                if (doorbotId > 0L && token.isNotBlank()) {
-                                    val endpoints = listOf(
-                                        "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now",
-                                        "https://app-snaps.ring.com/next/$doorbotId?_t=$now",
-                                        "https://api.ring.com/v1/devices/$doorbotId/media/image/download?_t=$now"
-                                    )
-                                    for (endpoint in endpoints) {
-                                        try {
-                                            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                                                connectTimeout = 3500
-                                                readTimeout = 3500
-                                                useCaches = false
-                                                setRequestProperty("Authorization", "Bearer $token")
-                                                setRequestProperty("User-Agent", "android:com.ringapp")
-                                                setRequestProperty("Cache-Control", "no-cache")
-                                                setRequestProperty("Accept", "image/jpeg, */*")
-                                            }
-                                            if (conn.responseCode in 200..299) {
-                                                val bytes = conn.inputStream.readBytes()
-                                                conn.disconnect()
-                                                if (bytes.isNotEmpty()) {
-                                                    val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                    if (decoded != null) return@withContext decoded
-                                                }
-                                            } else {
-                                                conn.disconnect()
-                                            }
-                                        } catch (_: Exception) {}
-                                    }
-                                }
-
-                                null
-                            }
-
-                            if (bmp != null) {
-                                currentBitmap = bmp
-                                isConnecting = false
-                                errorMessage = null
-                            } else if (currentBitmap == null) {
-                                errorMessage = "Sin snapshot Ring (toca para reintentar)"
-                            }
-                        } catch (e: Exception) {
-                            if (currentBitmap == null) {
-                                errorMessage = e.message ?: "Error conectando con Ring"
-                            }
-                        }
-                        delay(2500L)
-                    }
-                }
-
-                currentBitmap?.let { bmp ->
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = camera.name,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                }
+                WearRingStreamSurface(
+                    camera = camera,
+                    isMuted = isMuted,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
 
             // 2. Cámaras V380 Pro Nativo (MediaCodec + AudioTrack G.711A)

@@ -15,8 +15,8 @@ android {
         applicationId = "com.frcam.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.1.8"
+        versionCode = 15
+        versionName = "1.1.9"
 
         vectorDrawables.useSupportLibrary = true
     }
@@ -129,6 +129,7 @@ dependencies {
 
     implementation("com.google.android.gms:play-services-wearable:19.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     coreLibraryDesugaring(libs.desugaring)
     testImplementation(libs.junit)

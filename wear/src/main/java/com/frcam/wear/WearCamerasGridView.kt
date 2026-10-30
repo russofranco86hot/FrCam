@@ -112,7 +112,7 @@ fun WearCamerasGridView(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 10.dp, bottom = 4.dp, start = 18.dp, end = 18.dp),
+                        .padding(top = 16.dp, bottom = 4.dp, start = 26.dp, end = 26.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {

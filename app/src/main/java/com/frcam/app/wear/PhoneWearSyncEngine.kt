@@ -67,6 +67,34 @@ object PhoneWearSyncEngine {
                             val firstLine = reader.readLine() ?: ""
                             Log.d(TAG, "Petición HTTP recibida desde ${client.inetAddress.hostAddress}: $firstLine")
 
+                            if (firstLine.contains("/ring_ticket")) {
+                                val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
+                                val id = idStr?.toLongOrNull() ?: 0L
+                                if (id > 0L) {
+                                    com.frcam.app.protocol.RingCloudClient.wakeLiveStream(id)
+                                    val ticket = com.frcam.app.protocol.RingCloudClient.requestSignalingTicket()
+                                    if (!ticket.isNullOrBlank()) {
+                                        val jsonResp = """{"ticket":"$ticket"}"""
+                                        val out = client.getOutputStream()
+                                        val header = "HTTP/1.1 200 OK\r\n" +
+                                                "Content-Type: application/json; charset=utf-8\r\n" +
+                                                "Content-Length: ${jsonResp.length}\r\n" +
+                                                "Connection: close\r\n\r\n"
+                                        out.write(header.toByteArray(Charsets.UTF_8))
+                                        out.write(jsonResp.toByteArray(Charsets.UTF_8))
+                                        out.flush()
+                                        client.close()
+                                        return@launch
+                                    }
+                                }
+                                val out = client.getOutputStream()
+                                val header = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"
+                                out.write(header.toByteArray(Charsets.UTF_8))
+                                out.flush()
+                                client.close()
+                                return@launch
+                            }
+
                             if (firstLine.contains("/ring_snapshot")) {
                                 val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
                                 val id = idStr?.toLongOrNull() ?: 0L

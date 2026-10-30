@@ -249,7 +249,7 @@ fun WearSingleCameraFullscreen(
             }
         }
 
-        // Controles superpuestos (Barra superior unificada y centrada, Navegación y Barra de Zoom/Mic)
+        // Controles superpuestos (Totalmente seguros para pantallas circulares de Wear OS)
         AnimatedVisibility(
             visible = showOverlayControls || isBroadcasting,
             enter = fadeIn(),
@@ -257,171 +257,77 @@ fun WearSingleCameraFullscreen(
             modifier = Modifier.fillMaxSize()
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Barra superior unificada y centrada (protegida del bisel circular de Wear OS)
+                // 1. Título compacto arriba en el centro (y=12dp)
                 Surface(
-                    color = Color.Black.copy(alpha = 0.80f),
-                    shape = RoundedCornerShape(20.dp),
+                    color = Color.Black.copy(alpha = 0.75f),
+                    shape = RoundedCornerShape(12.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = if (isBroadcasting) 38.dp else 10.dp)
+                        .padding(top = 12.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        // Botón volver a vista de cuadrícula
-                        IconButton(
-                            onClick = {
-                                broadcaster.stopBroadcasting()
-                                onBackToGrid()
-                            },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.GridView,
-                                contentDescription = "Ver todas las cámaras",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-
-                        // Título y número de cámara en el centro
-                        Text(
-                            text = "${currentIndex + 1}/${cameras.size} • ${currentCamera.name}",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF38BDF8),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .widthIn(max = 105.dp)
-                                .padding(horizontal = 2.dp)
-                        )
-
-                        // Botón de Sonido (Mute / Unmute)
-                        IconButton(
-                            onClick = {
-                                isMuted = !isMuted
-                            },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                                contentDescription = if (isMuted) "Activar sonido" else "Silenciar",
-                                tint = if (isMuted) Color(0xFF94A3B8) else Color(0xFF38BDF8),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Flechas de cambio de cámara (anterior y siguiente)
-                if (cameras.size > 1) {
-                    IconButton(
-                        onClick = {
-                            broadcaster.stopBroadcasting()
-                            currentIndex = if (currentIndex > 0) currentIndex - 1 else cameras.size - 1
-                        },
-                        modifier = Modifier
-                            .align(Alignment.CenterStart)
-                            .padding(start = 2.dp)
-                            .size(28.dp)
-                            .background(Color.Black.copy(alpha = 0.55f), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ChevronLeft,
-                            contentDescription = "Cámara anterior",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            broadcaster.stopBroadcasting()
-                            currentIndex = (currentIndex + 1) % cameras.size
-                        },
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .padding(end = 2.dp)
-                            .size(28.dp)
-                            .background(Color.Black.copy(alpha = 0.55f), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ChevronRight,
-                            contentDescription = "Cámara siguiente",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-
-                // Barra inferior combinada: Zoom + Botón de Micrófono
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 8.dp)
-                        .background(Color.Black.copy(alpha = 0.80f), RoundedCornerShape(18.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Botón Alejar Zoom
-                    IconButton(
-                        onClick = {
-                            val newScale = (scale - 0.5f).coerceAtLeast(1f)
-                            scale = newScale
-                            if (newScale <= 1f) offset = Offset.Zero
-                        },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Remove,
-                            contentDescription = "Alejar zoom",
-                            tint = if (scale > 1f) Color(0xFF38BDF8) else Color(0xFF64748B),
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-
-                    // Indicador de nivel de Zoom actual
                     Text(
-                        text = "${"%.1f".format(scale)}x",
+                        text = "${currentIndex + 1}/${cameras.size} • ${currentCamera.name}",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White,
+                        color = Color(0xFF38BDF8),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .clickable {
-                                scale = 1f
-                                offset = Offset.Zero
-                            }
-                            .padding(horizontal = 4.dp)
+                            .widthIn(max = 100.dp)
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
                     )
+                }
 
-                    // Botón Acercar Zoom
+                // 2. Fila principal de acciones centrada a y=38dp (Volver, Parlante, Micrófono)
+                // En y=38dp una pantalla redonda tiene más de 156dp de ancho, permitiendo ver y pulsar los 3 botones sin corte
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 38.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Botón Volver a cuadrícula
                     IconButton(
                         onClick = {
-                            scale = (scale + 0.5f).coerceAtMost(4.5f)
+                            broadcaster.stopBroadcasting()
+                            onBackToGrid()
                         },
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color.Black.copy(alpha = 0.85f), CircleShape)
+                            .border(1.dp, Color(0xFF334155), CircleShape)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = "Acercar zoom",
-                            tint = if (scale < 4.5f) Color(0xFF38BDF8) else Color(0xFF64748B),
-                            modifier = Modifier.size(16.dp)
+                            imageVector = Icons.Default.GridView,
+                            contentDescription = "Ver todas las cámaras",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    Box(
+                    // Botón Sonido / Parlante (Mute / Unmute)
+                    IconButton(
+                        onClick = {
+                            val nextMuted = !isMuted
+                            isMuted = nextMuted
+                            WearRingWebRtcController.setSpeakerMuted(nextMuted)
+                        },
                         modifier = Modifier
-                            .height(18.dp)
-                            .width(1.dp)
-                            .background(Color(0xFF334155))
-                    )
+                            .size(34.dp)
+                            .background(Color.Black.copy(alpha = 0.85f), CircleShape)
+                            .border(1.dp, Color(0xFF334155), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = if (isMuted) "Activar sonido" else "Silenciar",
+                            tint = if (isMuted) Color(0xFF94A3B8) else Color(0xFF38BDF8),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
 
-                    // Botón de Micrófono / Intercomunicador
+                    // Botón Micrófono / Intercomunicador
                     IconButton(
                         onClick = {
                             if (isBroadcasting) {
@@ -438,9 +344,14 @@ fun WearSingleCameraFullscreen(
                             }
                         },
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(34.dp)
                             .background(
-                                if (isBroadcasting) Color(0xFFDC2626) else Color.Transparent,
+                                if (isBroadcasting) Color(0xFFDC2626) else Color.Black.copy(alpha = 0.85f),
+                                CircleShape
+                            )
+                            .border(
+                                1.dp,
+                                if (isBroadcasting) Color(0xFFEF4444) else Color(0xFF334155),
                                 CircleShape
                             )
                     ) {
@@ -448,8 +359,111 @@ fun WearSingleCameraFullscreen(
                             imageVector = if (isBroadcasting) Icons.Default.Mic else Icons.Default.MicOff,
                             contentDescription = if (isBroadcasting) "Detener micrófono" else "Hablar por cámara",
                             tint = if (isBroadcasting) Color.White else Color(0xFFF59E0B),
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(18.dp)
                         )
+                    }
+                }
+
+                // Flechas de cambio de cámara (anterior y siguiente)
+                if (cameras.size > 1) {
+                    IconButton(
+                        onClick = {
+                            broadcaster.stopBroadcasting()
+                            currentIndex = if (currentIndex > 0) currentIndex - 1 else cameras.size - 1
+                        },
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 6.dp)
+                            .size(28.dp)
+                            .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ChevronLeft,
+                            contentDescription = "Cámara anterior",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            broadcaster.stopBroadcasting()
+                            currentIndex = (currentIndex + 1) % cameras.size
+                        },
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 6.dp)
+                            .size(28.dp)
+                            .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = "Cámara siguiente",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                // Barra inferior de Zoom (segura para esferas redondas a y=20dp del borde inferior)
+                Surface(
+                    color = Color.Black.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(18.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 20.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Botón Alejar Zoom
+                        IconButton(
+                            onClick = {
+                                val newScale = (scale - 0.5f).coerceAtLeast(1f)
+                                scale = newScale
+                                if (newScale <= 1f) offset = Offset.Zero
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Remove,
+                                contentDescription = "Alejar zoom",
+                                tint = if (scale > 1f) Color(0xFF38BDF8) else Color(0xFF64748B),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        // Indicador de nivel de Zoom actual
+                        Text(
+                            text = "${"%.1f".format(scale)}x",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier
+                                .clickable {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                }
+                                .padding(horizontal = 4.dp)
+                        )
+
+                        // Botón Acercar Zoom
+                        IconButton(
+                            onClick = {
+                                scale = (scale + 0.5f).coerceAtMost(4.5f)
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Acercar zoom",
+                                tint = if (scale < 4.5f) Color(0xFF38BDF8) else Color(0xFF64748B),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                 }
             }
