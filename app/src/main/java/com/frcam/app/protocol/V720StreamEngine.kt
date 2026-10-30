@@ -7,6 +7,9 @@ import com.frcam.app.model.CameraConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.net.DatagramPacket
@@ -417,23 +420,36 @@ object V720StreamEngine {
             }
         } catch (_: Exception) {}
 
-        // 2. Probar IPs de la subred rápidamente
-        for (octet in 1..254) {
-            val ip = "$subnetPrefix.$octet"
-            if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) continue
-            try {
-                DatagramSocket().use { socket ->
-                    socket.soTimeout = 40
-                    val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
-                    val target = InetAddress.getByName(ip)
-                    socket.send(DatagramPacket(probe, probe.size, target, 6123))
-                    val buf = ByteArray(256)
-                    val pack = DatagramPacket(buf, buf.size)
-                    socket.receive(pack)
-                    return@withContext ip
+        // 2. Probar IPs de la subred concurrentemente
+        val ports = listOf(80, 8080, 554, 81, 6123, 10002)
+        val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
+        val found = coroutineScope {
+            (1..254).map { octet ->
+                async {
+                    val ip = "$subnetPrefix.$octet"
+                    if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) return@async null
+
+                    // UDP 6123
+                    try {
+                        DatagramSocket().use { socket ->
+                            socket.soTimeout = 80
+                            val target = InetAddress.getByName(ip)
+                            socket.send(DatagramPacket(probe, probe.size, target, 6123))
+                            val buf = ByteArray(256)
+                            val pack = DatagramPacket(buf, buf.size)
+                            socket.receive(pack)
+                            return@async ip
+                        }
+                    } catch (_: Exception) {}
+
+                    // TCP ports
+                    for (p in ports) {
+                        if (isTcpPortOpen(ip, p, 80)) return@async ip
+                    }
+                    null
                 }
-            } catch (_: Exception) {}
+            }.awaitAll().filterNotNull().firstOrNull()
         }
-        null
+        found
     }
 }

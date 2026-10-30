@@ -554,11 +554,11 @@ object BluetoothCameraEngine {
             return@withContext ip
         }
 
-        // 3. Barrido concurrente de la subred local (UDP {"code":50} y puertos propietarios V720)
+        // 3. Barrido concurrente de la subred local (UDP {"code":50} y puertos propietarios V720 / HTTP / RTSP)
         val localIp = NetworkCameraScanner.getLocalIpv4Address()
         val subnetPrefix = localIp?.substringBeforeLast(".").orEmpty()
         if (subnetPrefix.isNotBlank()) {
-            val v720Ports = listOf(6123, 10002, 10003, 16123, 6600)
+            val v720Ports = listOf(80, 8080, 554, 81, 6123, 10002, 10003, 16123, 8554, 8888, 5000, 6600)
             val probeData = """{"code":50}""".toByteArray(Charsets.UTF_8)
             val foundIp = coroutineScope {
                 (1..254).map { octet ->
@@ -583,7 +583,7 @@ object BluetoothCameraEngine {
                             }
                         } catch (_: Exception) {}
 
-                        // 3b. Probe TCP en puertos V720
+                        // 3b. Probe TCP en puertos V720 / HTTP / RTSP
                         for (port in v720Ports) {
                             if (NetworkCameraScanner.isTcpPortOpen(ip, port, timeoutMs = 150)) {
                                 return@async ip

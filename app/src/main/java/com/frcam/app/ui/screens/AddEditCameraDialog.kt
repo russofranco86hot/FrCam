@@ -1495,17 +1495,17 @@ fun LanDiscoveryDialog(
                                                                                 }
                                                                             }
                                                                             isBleProvisioning = false
+                                                                            val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = resolvedIp ?: "")
                                                                             if (resolvedIp != null) {
-                                                                                val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = resolvedIp)
                                                                                 Toast.makeText(context, "¡Cámara V720 conectada a tu Wi-Fi en $resolvedIp! (Luz azul fija)", Toast.LENGTH_LONG).show()
-                                                                                onAddBleCamera?.invoke(cfg)
                                                                             } else {
                                                                                 Toast.makeText(
                                                                                     context,
-                                                                                    "Credenciales enviadas a la cámara. Cuando la luz azul quede fija, pulsa 'Buscar IP'.",
+                                                                                    "Cámara agregada. Si tu router le asignó una IP puedes ingresarla aquí o dejarla vacía.",
                                                                                     Toast.LENGTH_LONG
                                                                                 ).show()
                                                                             }
+                                                                            onAddBleCamera?.invoke(cfg)
                                                                         }
                                                                     }.onFailure { err ->
                                                                         isBleProvisioning = false
@@ -1527,17 +1527,17 @@ fun LanDiscoveryDialog(
                                                                 Toast.makeText(context, "Buscando cámara V720 en tu router Wi-Fi...", Toast.LENGTH_SHORT).show()
                                                                 val ip = BluetoothCameraEngine.resolveV720Ip(dev)
                                                                 isBleProvisioning = false
+                                                                val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = ip ?: "")
                                                                 if (ip != null) {
                                                                     Toast.makeText(context, "¡Cámara V720 detectada en $ip!", Toast.LENGTH_SHORT).show()
-                                                                    val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = ip)
-                                                                    onAddBleCamera?.invoke(cfg)
                                                                 } else {
                                                                     Toast.makeText(
                                                                         context,
-                                                                        "La cámara no respondió aún en tu Wi-Fi. Si la luz azul parpadea rápido, pulsa 'Vincular a mi Wi-Fi'.",
+                                                                        "Abriendo configuración. Puedes verificar la IP asignada por tu router o dejarla vacía.",
                                                                         Toast.LENGTH_LONG
                                                                     ).show()
                                                                 }
+                                                                onAddBleCamera?.invoke(cfg)
                                                             }
                                                         },
                                                         enabled = !isBleProvisioning,
