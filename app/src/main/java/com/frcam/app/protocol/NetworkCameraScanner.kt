@@ -279,9 +279,11 @@ object NetworkCameraScanner {
                 socket.soTimeout = 400
                 val broadcastAddr = InetAddress.getByName("255.255.255.255")
                 val probePayloads = listOf(
+                    "{\"code\":50}".toByteArray(Charsets.UTF_8),
+                    "{\"code\":10}".toByteArray(Charsets.UTF_8),
+                    "{\"cmd\":\"search\"}\n".toByteArray(Charsets.UTF_8),
                     "NAX_DISCOVER\n".toByteArray(Charsets.US_ASCII),
                     "DISCOVER\n".toByteArray(Charsets.US_ASCII),
-                    "{\"cmd\":\"search\"}\n".toByteArray(Charsets.UTF_8),
                     byteArrayOf(0x00, 0x00, 0x00, 0x00)
                 )
                 val targetPorts = listOf(6123, 10002, 10003, 16123, 6600)
@@ -294,7 +296,7 @@ object NetworkCameraScanner {
                     }
                 }
                 val buf = ByteArray(2048)
-                val deadline = System.currentTimeMillis() + 600L
+                val deadline = System.currentTimeMillis() + 800L
                 while (System.currentTimeMillis() < deadline) {
                     try {
                         val recv = DatagramPacket(buf, buf.size)
@@ -302,17 +304,23 @@ object NetworkCameraScanner {
                         val ip = recv.address?.hostAddress ?: continue
                         if (found.none { it.ipAddress == ip }) {
                             val recvPort = recv.port
+                            val text = String(buf, 0, recv.length, Charsets.UTF_8)
+                            val devId = if (text.contains("\"devTarget\"")) {
+                                text.substringAfter("\"devTarget\"").substringAfter(":").substringBefore(",").substringBefore("}").replace("\"", "").trim()
+                            } else ""
+
                             found.add(
                                 DiscoveredCameraDevice(
                                     ipAddress = ip,
                                     detectedBrand = CameraBrand.V720_NAXCLOW,
-                                    deviceName = "Cámara V720 Naxclow ($ip)",
+                                    deviceName = if (devId.isNotBlank()) "Cámara V720 ($devId)" else "Cámara V720 Naxclow ($ip)",
+                                    deviceId = devId,
                                     openPorts = listOf(recvPort, 80),
                                     rtspPort = 554,
                                     httpPort = 80,
                                     onvifPort = recvPort,
-                                    suggestedMainPath = "/live/ch0",
-                                    suggestedSubPath = "/mjpeg/1",
+                                    suggestedMainPath = "/video",
+                                    suggestedSubPath = "/video",
                                     macOrHardwareInfo = "V720 UDP Broadcast (Puerto $recvPort)"
                                 )
                             )

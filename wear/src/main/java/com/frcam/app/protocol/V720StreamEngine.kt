@@ -34,20 +34,37 @@ object V720StreamEngine {
         onFrame: (Bitmap) -> Unit,
         onError: (String) -> Unit
     ) = withContext(Dispatchers.IO) {
-        val host = camera.host.trim()
+        var host = camera.host.trim()
         val rawId = camera.deviceId.ifBlank {
             camera.name.substringAfter("(").substringBefore(")").trim()
         }
         val cleanDevId = rawId.filter { it.isLetterOrDigit() }
         val localIp = getLocalIpv4Address() ?: "127.0.0.1"
 
+        // Auto-resolver host si está vacío o no configurado
+        if (host.isBlank() || host == "127.0.0.1" || host == "0.0.0.0") {
+            val resolved = resolveV720IpDirectly()
+            if (!resolved.isNullOrBlank()) {
+                host = resolved
+                Log.d(TAG, "IP V720 resuelta automáticamente: $host")
+            }
+        }
+
+        // Si el móvil está en la red AP de la cámara (ej. Nax_...)
+        if (host.isBlank() || host == "127.0.0.1") {
+            if (localIp.startsWith("192.168.169.")) host = "192.168.169.1"
+            else if (localIp.startsWith("192.168.4.")) host = "192.168.4.1"
+        }
+
         Log.d(TAG, "Iniciando stream V720 para host=$host, deviceId=$cleanDevId, localIp=$localIp")
 
         // 1. Probar primero si la cámara expone stream HTTP MJPEG directo
-        val httpSuccess = tryHttpStream(host, camera.httpPort, onFrame)
-        if (httpSuccess) {
-            Log.d(TAG, "Stream V720 completado vía HTTP")
-            return@withContext
+        if (host.isNotBlank() && host != "127.0.0.1") {
+            val httpSuccess = tryHttpStream(host, camera.httpPort, onFrame)
+            if (httpSuccess) {
+                Log.d(TAG, "Stream V720 completado vía HTTP")
+                return@withContext
+            }
         }
 
         // 2. Probar protocolo propietario Naxclow UDP/TCP en puerto 6123 / 10002
@@ -57,7 +74,7 @@ object V720StreamEngine {
             return@withContext
         }
 
-        onError("No se pudo iniciar video V720. Verifica que la cámara esté encendida en la misma red Wi-Fi.")
+        onError("No se pudo iniciar video V720. Verifica que la cámara esté encendida con luz azul fija en la misma red Wi-Fi.")
     }
 
     private suspend fun tryHttpStream(
@@ -143,45 +160,51 @@ object V720StreamEngine {
             socket.soTimeout = 2500
             val localPort = socket.localPort
 
+            val probeJson = """{"code":50}"""
+            val probeBytes = probeJson.toByteArray(Charsets.UTF_8)
+            val streamJson = """{"code":53,"status":1}"""
+            val streamBytes = streamJson.toByteArray(Charsets.UTF_8)
             val natReqJson = """{"code":11,"cliTarget":"frcam","cliToken":"55ABfb77","cliIp":"$localIp","cliPort":$localPort,"cliNatIp":"$localIp","cliNatPort":$localPort}"""
             val natReqBytes = natReqJson.toByteArray(Charsets.UTF_8)
 
-            // A) Enviar por UDP a la cámara local en puertos 6123, 10002 y 10003
-            if (host.isNotBlank()) {
+            // A) Enviar probes por UDP a la cámara y por broadcast
+            val targetIps = mutableListOf<String>()
+            if (host.isNotBlank() && host != "127.0.0.1") targetIps.add(host)
+            targetIps.add("255.255.255.255")
+            targetIps.add("192.168.169.1")
+
+            for (h in targetIps) {
                 try {
-                    val destAddr = InetAddress.getByName(host)
+                    val destAddr = InetAddress.getByName(h)
                     for (p in listOf(6123, 10002, 10003, 16123)) {
                         try {
+                            socket.send(DatagramPacket(probeBytes, probeBytes.size, destAddr, p))
                             socket.send(DatagramPacket(natReqBytes, natReqBytes.size, destAddr, p))
+                            socket.send(DatagramPacket(streamBytes, streamBytes.size, destAddr, p))
                         } catch (_: Exception) {}
                     }
                 } catch (_: Exception) {}
 
-                // B) Enviar por TCP a la cámara local en puerto 6123
-                try {
-                    Socket().use { tcpSocket ->
-                        tcpSocket.soTimeout = 1000
-                        tcpSocket.connect(InetSocketAddress(host, 6123), 1000)
-                        val out = tcpSocket.getOutputStream()
-                        out.write(natReqBytes)
-                        out.flush()
+                // B) Enviar por TCP a la cámara en puertos 6123 / 10002
+                if (h != "255.255.255.255") {
+                    for (p in listOf(6123, 10002)) {
+                        try {
+                            Socket().use { tcpSocket ->
+                                tcpSocket.soTimeout = 600
+                                tcpSocket.connect(InetSocketAddress(h, p), 600)
+                                val out = tcpSocket.getOutputStream()
+                                out.write(probeBytes)
+                                out.write(streamBytes)
+                                out.flush()
+                            }
+                        } catch (_: Exception) {}
                     }
-                } catch (_: Exception) {}
-            }
-
-            // C) Si se conoce el ID de dispositivo, enviar también al broker MQTT oficial de Naxclow
-            if (deviceId.isNotBlank() && deviceId.length >= 6) {
-                try {
-                    sendMqttNatReq(deviceId, natReqJson)
-                } catch (e: Exception) {
-                    Log.w(TAG, "No se pudo enviar NAT_REQ vía MQTT: ${e.message}")
                 }
             }
 
-            val recvBuf = ByteArray(8192)
+            val recvBuf = ByteArray(65536)
             val packet = DatagramPacket(recvBuf, recvBuf.size)
-            val jpegStreamBuf = ByteArrayOutputStream(131072)
-            var prevByte = -1
+            val jpegStreamBuf = ByteArrayOutputStream(262144)
             var capturingJpeg = false
             var receivedFrames = 0
             val startTime = System.currentTimeMillis()
@@ -191,54 +214,75 @@ object V720StreamEngine {
                     socket.receive(packet)
                     val len = packet.length
                     val data = packet.data
+                    val senderAddr = packet.address
+                    val senderPort = packet.port
 
-                    // Si recibimos handshake code 20 {"code":20}, responder inmediatamente code 21
-                    if (len in 8..128) {
+                    // Si recibimos handshake code 20 {"code":20}, responder inmediatamente code 21 y activar stream
+                    if (len in 8..200) {
                         val text = String(data, 0, len, Charsets.UTF_8)
                         if (text.contains("\"code\":20") || text.contains("\"code\": 20")) {
                             val rsp = """{"code":21,"ip":"$localIp","port":$localPort}""".toByteArray(Charsets.UTF_8)
-                            socket.send(DatagramPacket(rsp, rsp.size, packet.address, packet.port))
-                            Log.d(TAG, "Handshake V720 code 20 recibido, respondido code 21 a ${packet.address}")
+                            socket.send(DatagramPacket(rsp, rsp.size, senderAddr, senderPort))
+                            socket.send(DatagramPacket(streamBytes, streamBytes.size, senderAddr, senderPort))
+                            Log.d(TAG, "Handshake V720 code 20 recibido, respondido code 21 a $senderAddr:$senderPort")
+                            continue
+                        }
+                        if (text.contains("\"code\":51") || text.contains("\"code\": 51")) {
+                            socket.send(DatagramPacket(streamBytes, streamBytes.size, senderAddr, senderPort))
+                            socket.send(DatagramPacket(natReqBytes, natReqBytes.size, senderAddr, senderPort))
+                            Log.d(TAG, "Handshake V720 code 51 recibido, solicitado stream code 53")
                             continue
                         }
                     }
 
                     // Ensamblar frames JPEG a partir de los paquetes UDP recibidos
-                    for (i in 0 until len) {
-                        val b = data[i].toInt() and 0xFF
-                        if (!capturingJpeg) {
-                            if (prevByte == 0xFF && b == 0xD8) {
-                                capturingJpeg = true
-                                jpegStreamBuf.reset()
-                                jpegStreamBuf.write(0xFF)
-                                jpegStreamBuf.write(0xD8)
-                            }
-                        } else {
-                            jpegStreamBuf.write(b)
-                            if (prevByte == 0xFF && b == 0xD9) {
-                                val bytes = jpegStreamBuf.toByteArray()
-                                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                if (bmp != null) {
-                                    onFrame(bmp)
-                                    receivedFrames++
-                                }
-                                capturingJpeg = false
-                                jpegStreamBuf.reset()
-                            } else if (jpegStreamBuf.size() > 1_500_000) {
-                                capturingJpeg = false
-                                jpegStreamBuf.reset()
+                    var startIdx = -1
+                    for (i in 0 until len - 1) {
+                        if ((data[i].toInt() and 0xFF) == 0xFF && (data[i + 1].toInt() and 0xFF) == 0xD8) {
+                            startIdx = i
+                            break
+                        }
+                    }
+
+                    var endIdx = -1
+                    for (i in 0 until len - 1) {
+                        if ((data[i].toInt() and 0xFF) == 0xFF && (data[i + 1].toInt() and 0xFF) == 0xD9) {
+                            endIdx = i + 1
+                            break
+                        }
+                    }
+
+                    if (startIdx >= 0) {
+                        capturingJpeg = true
+                        jpegStreamBuf.reset()
+                        jpegStreamBuf.write(data, startIdx, len - startIdx)
+                    } else if (capturingJpeg) {
+                        jpegStreamBuf.write(data, 0, len)
+                    }
+
+                    if (capturingJpeg && endIdx >= 0) {
+                        val bytes = jpegStreamBuf.toByteArray()
+                        if (bytes.size > 200) {
+                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bmp != null) {
+                                onFrame(bmp)
+                                receivedFrames++
                             }
                         }
-                        prevByte = b
+                        capturingJpeg = false
+                        jpegStreamBuf.reset()
+                    } else if (jpegStreamBuf.size() > 1_500_000) {
+                        capturingJpeg = false
+                        jpegStreamBuf.reset()
                     }
 
                     // Enviar confirmación periódica de recepción a la cámara para mantener el stream activo
-                    if (receivedFrames > 0 && receivedFrames % 10 == 0) {
+                    if (receivedFrames > 0 && receivedFrames % 5 == 0) {
                         val ack = """{"code":605,"p":1}""".toByteArray(Charsets.UTF_8)
-                        socket.send(DatagramPacket(ack, ack.size, packet.address, packet.port))
+                        socket.send(DatagramPacket(ack, ack.size, senderAddr, senderPort))
                     }
                 } catch (e: java.net.SocketTimeoutException) {
-                    if (receivedFrames == 0 && (System.currentTimeMillis() - startTime) > 4000L) {
+                    if (receivedFrames == 0 && (System.currentTimeMillis() - startTime) > 4500L) {
                         break
                     }
                 }
@@ -349,5 +393,47 @@ object V720StreamEngine {
         } catch (_: Exception) {
             false
         }
+    }
+
+    private suspend fun resolveV720IpDirectly(): String? = withContext(Dispatchers.IO) {
+        val localIp = getLocalIpv4Address() ?: return@withContext null
+        val subnetPrefix = localIp.substringBeforeLast(".")
+
+        // 1. Broadcast UDP {"code":50}
+        try {
+            DatagramSocket().use { socket ->
+                socket.broadcast = true
+                socket.soTimeout = 300
+                val broadcastAddr = InetAddress.getByName("255.255.255.255")
+                val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
+                for (p in listOf(6123, 10002)) {
+                    socket.send(DatagramPacket(probe, probe.size, broadcastAddr, p))
+                }
+                val buf = ByteArray(1024)
+                val pack = DatagramPacket(buf, buf.size)
+                socket.receive(pack)
+                val ip = pack.address?.hostAddress
+                if (!ip.isNullOrBlank() && ip != localIp) return@withContext ip
+            }
+        } catch (_: Exception) {}
+
+        // 2. Probar IPs de la subred rápidamente
+        for (octet in 1..254) {
+            val ip = "$subnetPrefix.$octet"
+            if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) continue
+            try {
+                DatagramSocket().use { socket ->
+                    socket.soTimeout = 40
+                    val probe = """{"code":50}""".toByteArray(Charsets.UTF_8)
+                    val target = InetAddress.getByName(ip)
+                    socket.send(DatagramPacket(probe, probe.size, target, 6123))
+                    val buf = ByteArray(256)
+                    val pack = DatagramPacket(buf, buf.size)
+                    socket.receive(pack)
+                    return@withContext ip
+                }
+            } catch (_: Exception) {}
+        }
+        null
     }
 }

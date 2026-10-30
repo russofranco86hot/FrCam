@@ -1451,6 +1451,12 @@ fun LanDiscoveryDialog(
                                                         }
                                                     }
                                                 }
+                                                Text(
+                                                    text = "💡 Si la cámara ya tiene luz azul FIJA, pulsa 'Buscar IP'. Si PARPADEA RÁPIDO (búsqueda), pulsa 'Vincular a mi Wi-Fi'.",
+                                                    fontSize = 10.sp,
+                                                    color = Color(0xFF38BDF8),
+                                                    modifier = Modifier.padding(vertical = 4.dp)
+                                                )
                                                 Row(
                                                     modifier = Modifier.fillMaxWidth(),
                                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1478,7 +1484,7 @@ fun LanDiscoveryDialog(
                                                                         coroutineScope.launch {
                                                                             Toast.makeText(context, "$msg Conectando al router...", Toast.LENGTH_SHORT).show()
                                                                             var resolvedIp: String? = null
-                                                                            for (attempt in 1..5) {
+                                                                            for (attempt in 1..8) {
                                                                                 delay(2000L)
                                                                                 val ip = BluetoothCameraEngine.resolveV720Ip(dev)
                                                                                 if (ip != null) {
@@ -1494,7 +1500,7 @@ fun LanDiscoveryDialog(
                                                                             } else {
                                                                                 Toast.makeText(
                                                                                     context,
-                                                                                    "Credenciales enviadas a la cámara. Si la luz azul aún parpadea rápido, verifica la contraseña de tu red Wi-Fi 2.4 GHz.",
+                                                                                    "Credenciales enviadas a la cámara. Cuando la luz azul quede fija, pulsa 'Buscar IP'.",
                                                                                     Toast.LENGTH_LONG
                                                                                 ).show()
                                                                             }
@@ -1526,7 +1532,7 @@ fun LanDiscoveryDialog(
                                                                 } else {
                                                                     Toast.makeText(
                                                                         context,
-                                                                        "La cámara no se detectó en tu Wi-Fi (luz azul parpadeando rápido). Pulsa 'Vincular a mi Wi-Fi' para enviarle la red.",
+                                                                        "La cámara no respondió aún en tu Wi-Fi. Si la luz azul parpadea rápido, pulsa 'Vincular a mi Wi-Fi'.",
                                                                         Toast.LENGTH_LONG
                                                                     ).show()
                                                                 }

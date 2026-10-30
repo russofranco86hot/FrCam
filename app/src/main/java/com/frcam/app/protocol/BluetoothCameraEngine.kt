@@ -243,7 +243,10 @@ object BluetoothCameraEngine {
         _provisioningStatus.value = "Conectando por Bluetooth a ${bleCamera.name}..."
         onStatus("Conectando con ${bleCamera.name} por Bluetooth...")
 
+        var isDone = false
         val timeoutRunnable = Runnable {
+            if (isDone) return@Runnable
+            isDone = true
             try {
                 activeGatt?.disconnect()
                 activeGatt?.close()
@@ -252,7 +255,7 @@ object BluetoothCameraEngine {
             _provisioningStatus.value = "Tiempo de espera agotado al conectar por Bluetooth"
             onResult(Result.failure(Exception("No hubo respuesta de la cámara por Bluetooth. Verifica que esté encendida con la luz azul parpadeando.")))
         }
-        mainHandler.postDelayed(timeoutRunnable, 18000L)
+        mainHandler.postDelayed(timeoutRunnable, 22000L)
 
         activeGatt = bleCamera.device.connectGatt(
             context,
@@ -261,29 +264,37 @@ object BluetoothCameraEngine {
                 override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
                         mainHandler.post {
-                            _provisioningStatus.value = "¡Bluetooth conectado! Negociando MTU y servicios..."
+                            _provisioningStatus.value = "¡Bluetooth conectado! Negociando servicios..."
                             onStatus("Conectado con ${bleCamera.name}. Negociando canal de datos...")
                         }
                         try {
-                            val mtuRequested = gatt?.requestMtu(512) ?: false
+                            val mtuRequested = gatt?.requestMtu(256) ?: false
                             if (!mtuRequested) {
                                 gatt?.discoverServices()
                             }
                         } catch (e: Exception) {
-                            finishWithError("Error iniciando servicios: ${e.message}", onResult, timeoutRunnable)
+                            gatt?.discoverServices()
                         }
                     } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                        Log.d(TAG, "BLE GATT desconectado")
+                        Log.d(TAG, "BLE GATT desconectado (la cámara se está reiniciando con Wi-Fi)")
+                        if (!isDone) {
+                            isDone = true
+                            mainHandler.removeCallbacks(timeoutRunnable)
+                            try {
+                                gatt?.close()
+                                activeGatt = null
+                            } catch (_: Exception) {}
+                            mainHandler.post {
+                                _provisioningStatus.value = "¡Cámara vinculada! Conectando a Wi-Fi (luz azul fija)..."
+                                onResult(Result.success("¡Credenciales aplicadas a ${bleCamera.name}! Espera unos segundos a que la luz azul quede fija."))
+                            }
+                        }
                     }
                 }
 
                 override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
                     Log.d(TAG, "MTU BLE configurado a $mtu")
-                    try {
-                        gatt?.discoverServices()
-                    } catch (e: Exception) {
-                        finishWithError("Error descubriendo servicios: ${e.message}", onResult, timeoutRunnable)
-                    }
+                    gatt?.discoverServices()
                 }
 
                 override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
@@ -297,66 +308,83 @@ object BluetoothCameraEngine {
                         onStatus("Enviando red '$ssid' a la cámara...")
                     }
 
-                    // Buscar características de escritura
                     val writeChars = findWritableCharacteristics(gatt.services)
                     if (writeChars.isEmpty()) {
                         finishWithError("No se encontró canal de escritura en la cámara", onResult, timeoutRunnable)
                         return
                     }
 
-                    // Formatos de carga útil para V720 / Naxclow / Beken:
-                    // 1. Formato estándar Naxclow: {"code":204,"s":"...","p":"..."}
-                    // 2. Formato directo: {"s":"...","p":"..."}
-                    // 3. Formato comando: {"cmd":"wifi","ssid":"...","password":"..."}
-                    val payloads = listOf(
-                        """{"code":204,"s":"${ssid.trim()}","p":"$pass"}""",
-                        """{"s":"${ssid.trim()}","p":"$pass"}""",
-                        """{"cmd":"wifi","ssid":"${ssid.trim()}","password":"$pass"}"""
-                    )
+                    val char = writeChars.first()
 
-                    var sentCount = 0
-                    for (char in writeChars) {
-                        for (json in payloads) {
-                            val payloadBytes = json.toByteArray(Charsets.UTF_8)
-                            try {
-                                @Suppress("DEPRECATION")
-                                char.value = payloadBytes
-                                @Suppress("DEPRECATION")
-                                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                                val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    gatt.writeCharacteristic(char, payloadBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == 0
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    gatt.writeCharacteristic(char)
-                                }
-                                if (sent) {
-                                    sentCount++
-                                    Log.d(TAG, "Payload enviado a ${char.uuid}: $json")
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error transmitiendo a ${char.uuid}: ${e.message}")
-                            }
+                    findNotifyCharacteristic(gatt.services)?.let { notifyChar ->
+                        try {
+                            gatt.setCharacteristicNotification(notifyChar, true)
+                        } catch (_: Exception) {}
+                    }
+
+                    val json = """{"s":"${ssid.trim()}","p":"$pass"}"""
+                    val payloadBytes = json.toByteArray(Charsets.UTF_8)
+                    try {
+                        @Suppress("DEPRECATION")
+                        char.value = payloadBytes
+                        @Suppress("DEPRECATION")
+                        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                        val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            gatt.writeCharacteristic(char, payloadBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == 0
+                        } else {
+                            @Suppress("DEPRECATION")
+                            gatt.writeCharacteristic(char)
                         }
+                        Log.d(TAG, "Payload enviado a ${char.uuid}: $json (exitoso=$sent)")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error transmitiendo a ${char.uuid}: ${e.message}")
                     }
+                }
 
-                    if (sentCount > 0) {
-                        mainHandler.removeCallbacks(timeoutRunnable)
+                override fun onCharacteristicWrite(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
+                    Log.d(TAG, "onCharacteristicWrite status=$status")
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        mainHandler.post {
+                            _provisioningStatus.value = "¡Credenciales recibidas por la cámara! Conectando a '$ssid'..."
+                            onStatus("¡Red '$ssid' aceptada! Esperando que la luz azul quede fija...")
+                        }
                         mainHandler.postDelayed({
-                            try {
-                                gatt.disconnect()
-                                gatt.close()
-                                activeGatt = null
-                            } catch (_: Exception) {}
-                            _provisioningStatus.value = "¡Wi-Fi configurado con éxito por Bluetooth!"
-                            onResult(Result.success("¡Credenciales enviadas a la cámara ${bleCamera.name}! Conectando a '$ssid'..."))
-                        }, 1200L)
+                            if (!isDone) {
+                                isDone = true
+                                mainHandler.removeCallbacks(timeoutRunnable)
+                                try {
+                                    gatt?.disconnect()
+                                    gatt?.close()
+                                    activeGatt = null
+                                } catch (_: Exception) {}
+                                _provisioningStatus.value = "¡Wi-Fi configurado con éxito!"
+                                onResult(Result.success("¡Credenciales enviadas a la cámara! Espera a que la luz azul quede fija y pulsa 'Buscar IP'."))
+                            }
+                        }, 7000L)
                     } else {
-                        finishWithError("Error al transmitir datos por Bluetooth", onResult, timeoutRunnable)
+                        finishWithError("La cámara rechazó la configuración Wi-Fi (status=$status)", onResult, timeoutRunnable)
                     }
+                }
+
+                override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {
+                    val data = characteristic?.value ?: return
+                    val msg = String(data, Charsets.UTF_8)
+                    Log.d(TAG, "Notificación recibida de cámara: $msg")
                 }
             },
             BluetoothDevice.TRANSPORT_LE
         )
+    }
+
+    private fun findNotifyCharacteristic(services: List<BluetoothGattService>): BluetoothGattCharacteristic? {
+        for (service in services) {
+            for (char in service.characteristics) {
+                if ((char.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) {
+                    return char
+                }
+            }
+        }
+        return null
     }
 
     private fun findWritableCharacteristics(services: List<BluetoothGattService>): List<BluetoothGattCharacteristic> {
@@ -490,19 +518,38 @@ object BluetoothCameraEngine {
             return@withContext ip
         }
 
-        // 3. Barrido concurrente de la subred local en puertos específicos V720
+        // 3. Barrido concurrente de la subred local (UDP {"code":50} y puertos propietarios V720)
         val localIp = NetworkCameraScanner.getLocalIpv4Address()
         val subnetPrefix = localIp?.substringBeforeLast(".").orEmpty()
         if (subnetPrefix.isNotBlank()) {
-            // Únicamente puertos propietarios V720 / Naxclow (NUNCA 80 u 8080 para evitar falsos positivos con routers, PCs o Smart TVs)
             val v720Ports = listOf(6123, 10002, 10003, 16123, 6600)
+            val probeData = """{"code":50}""".toByteArray(Charsets.UTF_8)
             val foundIp = coroutineScope {
                 (1..254).map { octet ->
                     async {
                         val ip = "$subnetPrefix.$octet"
                         if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) return@async null
+
+                        // 3a. Probe UDP ultrarrápido {"code":50}
+                        try {
+                            java.net.DatagramSocket().use { sock ->
+                                sock.soTimeout = 120
+                                val target = java.net.InetAddress.getByName(ip)
+                                sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 6123))
+                                sock.send(java.net.DatagramPacket(probeData, probeData.size, target, 10002))
+                                val rBuf = ByteArray(512)
+                                val rPack = java.net.DatagramPacket(rBuf, rBuf.size)
+                                sock.receive(rPack)
+                                val rText = String(rBuf, 0, rPack.length, Charsets.UTF_8)
+                                if (rText.contains("\"code\"") || rPack.length > 0) {
+                                    return@async ip
+                                }
+                            }
+                        } catch (_: Exception) {}
+
+                        // 3b. Probe TCP en puertos V720
                         for (port in v720Ports) {
-                            if (NetworkCameraScanner.isTcpPortOpen(ip, port, timeoutMs = 300)) {
+                            if (NetworkCameraScanner.isTcpPortOpen(ip, port, timeoutMs = 150)) {
                                 return@async ip
                             }
                         }
