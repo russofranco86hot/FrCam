@@ -120,6 +120,28 @@ object CameraProvisioningEngine {
         }
     }
 
+    fun getSavedWifiCredentials(context: Context): Pair<String, String> {
+        return try {
+            val prefs = context.getSharedPreferences("frcam_wifi_prefs", Context.MODE_PRIVATE)
+            val ssid = prefs.getString("saved_wifi_ssid", "") ?: ""
+            val pass = prefs.getString("saved_wifi_pass", "") ?: ""
+            ssid to pass
+        } catch (_: Exception) {
+            "" to ""
+        }
+    }
+
+    fun saveWifiCredentials(context: Context, ssid: String, pass: String) {
+        try {
+            val prefs = context.getSharedPreferences("frcam_wifi_prefs", Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                if (ssid.isNotBlank()) putString("saved_wifi_ssid", ssid.trim())
+                putString("saved_wifi_pass", pass)
+                apply()
+            }
+        } catch (_: Exception) {}
+    }
+
     /**
      * Obtiene el SSID actual al que está conectado el teléfono y la IP de la puerta de enlace (Gateway).
      */
@@ -140,12 +162,22 @@ object CameraProvisioningEngine {
                 val net = connMgr?.activeNetwork
                 val caps = connMgr?.getNetworkCapabilities(net)
                 if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
-                    val info = wifiManager.connectionInfo
-                    ssid = info?.ssid?.removeSurrounding("\"")?.takeIf { it != "<unknown ssid>" }
+                    val wifiInfo = caps.transportInfo as? WifiInfo
+                    val rawSsid = wifiInfo?.ssid ?: wifiManager.connectionInfo?.ssid
+                    ssid = rawSsid?.removeSurrounding("\"")?.takeIf { it != "<unknown ssid>" && it.isNotBlank() }
                 }
-            } else {
+            }
+            if (ssid == null) {
                 val info = wifiManager.connectionInfo
-                ssid = info?.ssid?.removeSurrounding("\"")?.takeIf { it != "<unknown ssid>" }
+                ssid = info?.ssid?.removeSurrounding("\"")?.takeIf { it != "<unknown ssid>" && it.isNotBlank() }
+            }
+
+            // Fallback: Si Android ocultó el SSID por permisos de localización, usar el último SSID guardado
+            if (ssid.isNullOrBlank()) {
+                val (savedSsid, _) = getSavedWifiCredentials(context)
+                if (savedSsid.isNotBlank()) {
+                    ssid = savedSsid
+                }
             }
 
             return ssid to gatewayIp

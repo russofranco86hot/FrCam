@@ -250,9 +250,9 @@ object BluetoothCameraEngine {
                 activeGatt = null
             } catch (_: Exception) {}
             _provisioningStatus.value = "Tiempo de espera agotado al conectar por Bluetooth"
-            onResult(Result.failure(Exception("No hubo respuesta de la cámara por Bluetooth. Verifica que esté encendida.")))
+            onResult(Result.failure(Exception("No hubo respuesta de la cámara por Bluetooth. Verifica que esté encendida con la luz azul parpadeando.")))
         }
-        mainHandler.postDelayed(timeoutRunnable, 14000L)
+        mainHandler.postDelayed(timeoutRunnable, 18000L)
 
         activeGatt = bleCamera.device.connectGatt(
             context,
@@ -261,16 +261,28 @@ object BluetoothCameraEngine {
                 override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
                         mainHandler.post {
-                            _provisioningStatus.value = "¡Bluetooth conectado! Descubriendo servicios de la cámara..."
-                            onStatus("Descubriendo servicios de configuración en la cámara...")
+                            _provisioningStatus.value = "¡Bluetooth conectado! Negociando MTU y servicios..."
+                            onStatus("Conectado con ${bleCamera.name}. Negociando canal de datos...")
                         }
                         try {
-                            gatt?.discoverServices()
+                            val mtuRequested = gatt?.requestMtu(512) ?: false
+                            if (!mtuRequested) {
+                                gatt?.discoverServices()
+                            }
                         } catch (e: Exception) {
-                            finishWithError("Error descubriendo servicios: ${e.message}", onResult, timeoutRunnable)
+                            finishWithError("Error iniciando servicios: ${e.message}", onResult, timeoutRunnable)
                         }
                     } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                         Log.d(TAG, "BLE GATT desconectado")
+                    }
+                }
+
+                override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
+                    Log.d(TAG, "MTU BLE configurado a $mtu")
+                    try {
+                        gatt?.discoverServices()
+                    } catch (e: Exception) {
+                        finishWithError("Error descubriendo servicios: ${e.message}", onResult, timeoutRunnable)
                     }
                 }
 
@@ -282,27 +294,52 @@ object BluetoothCameraEngine {
 
                     mainHandler.post {
                         _provisioningStatus.value = "Enviando credenciales Wi-Fi por Bluetooth..."
-                        onStatus("Enviando nombre y clave Wi-Fi a la cámara...")
+                        onStatus("Enviando red '$ssid' a la cámara...")
                     }
 
-                    // Buscar característica de escritura
-                    val writeChar = findWritableCharacteristic(gatt.services)
-                    if (writeChar == null) {
+                    // Buscar características de escritura
+                    val writeChars = findWritableCharacteristics(gatt.services)
+                    if (writeChars.isEmpty()) {
                         finishWithError("No se encontró canal de escritura en la cámara", onResult, timeoutRunnable)
                         return
                     }
 
-                    // Carga útil de configuración Wi-Fi
-                    val jsonPayload = """{"s":"${ssid.trim()}","p":"$pass"}"""
-                    val payloadBytes = jsonPayload.toByteArray(Charsets.UTF_8)
+                    // Formatos de carga útil para V720 / Naxclow / Beken:
+                    // 1. Formato estándar Naxclow: {"code":204,"s":"...","p":"..."}
+                    // 2. Formato directo: {"s":"...","p":"..."}
+                    // 3. Formato comando: {"cmd":"wifi","ssid":"...","password":"..."}
+                    val payloads = listOf(
+                        """{"code":204,"s":"${ssid.trim()}","p":"$pass"}""",
+                        """{"s":"${ssid.trim()}","p":"$pass"}""",
+                        """{"cmd":"wifi","ssid":"${ssid.trim()}","password":"$pass"}"""
+                    )
 
-                    @Suppress("DEPRECATION")
-                    writeChar.value = payloadBytes
-                    @Suppress("DEPRECATION")
-                    writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    var sentCount = 0
+                    for (char in writeChars) {
+                        for (json in payloads) {
+                            val payloadBytes = json.toByteArray(Charsets.UTF_8)
+                            try {
+                                @Suppress("DEPRECATION")
+                                char.value = payloadBytes
+                                @Suppress("DEPRECATION")
+                                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                                val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    gatt.writeCharacteristic(char, payloadBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == 0
+                                } else {
+                                    @Suppress("DEPRECATION")
+                                    gatt.writeCharacteristic(char)
+                                }
+                                if (sent) {
+                                    sentCount++
+                                    Log.d(TAG, "Payload enviado a ${char.uuid}: $json")
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error transmitiendo a ${char.uuid}: ${e.message}")
+                            }
+                        }
+                    }
 
-                    val success = gatt.writeCharacteristic(writeChar)
-                    if (success) {
+                    if (sentCount > 0) {
                         mainHandler.removeCallbacks(timeoutRunnable)
                         mainHandler.postDelayed({
                             try {
@@ -311,8 +348,8 @@ object BluetoothCameraEngine {
                                 activeGatt = null
                             } catch (_: Exception) {}
                             _provisioningStatus.value = "¡Wi-Fi configurado con éxito por Bluetooth!"
-                            onResult(Result.success("¡Credenciales enviadas a la cámara ${bleCamera.name}! Se conectará a '$ssid'."))
-                        }, 1500L)
+                            onResult(Result.success("¡Credenciales enviadas a la cámara ${bleCamera.name}! Conectando a '$ssid'..."))
+                        }, 1200L)
                     } else {
                         finishWithError("Error al transmitir datos por Bluetooth", onResult, timeoutRunnable)
                     }
@@ -322,8 +359,10 @@ object BluetoothCameraEngine {
         )
     }
 
-    private fun findWritableCharacteristic(services: List<BluetoothGattService>): BluetoothGattCharacteristic? {
-        // 1. Buscar en servicios comunes de cámaras V720 / Naxclow / Beken / Tuya
+    private fun findWritableCharacteristics(services: List<BluetoothGattService>): List<BluetoothGattCharacteristic> {
+        val preferred = mutableListOf<BluetoothGattCharacteristic>()
+        val others = mutableListOf<BluetoothGattCharacteristic>()
+
         for (service in services) {
             val sUuid = service.uuid.toString().lowercase()
             for (char in service.characteristics) {
@@ -333,26 +372,17 @@ object BluetoothCameraEngine {
                 if (isWritable) {
                     val cUuid = char.uuid.toString().lowercase()
                     if (sUuid.contains("fee7") || sUuid.contains("fff0") || sUuid.contains("ffe0") ||
-                        cUuid.contains("fec7") || cUuid.contains("fff1") || cUuid.contains("ffe1")
+                        sUuid.contains("ae00") || sUuid.contains("ae01") ||
+                        cUuid.contains("fec7") || cUuid.contains("fec8") || cUuid.contains("fff1") || cUuid.contains("ffe1")
                     ) {
-                        return char
+                        preferred.add(char)
+                    } else {
+                        others.add(char)
                     }
                 }
             }
         }
-
-        // 2. Fallback: primera característica con permiso de escritura
-        for (service in services) {
-            for (char in service.characteristics) {
-                val prop = char.properties
-                if ((prop and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
-                    (prop and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
-                ) {
-                    return char
-                }
-            }
-        }
-        return null
+        return if (preferred.isNotEmpty()) preferred else others
     }
 
     private fun finishWithError(msg: String, onResult: (Result<String>) -> Unit, timeoutRunnable: Runnable) {
@@ -485,15 +515,17 @@ object BluetoothCameraEngine {
             }
         }
 
-        // 4. Verificación de modo AP (cuando el teléfono está conectado al Wi-Fi de la cámara)
-        for (apIp in listOf("192.168.169.1", "192.168.4.1")) {
-            if (NetworkCameraScanner.isTcpPortOpen(apIp, 80, 250) ||
-                NetworkCameraScanner.isTcpPortOpen(apIp, 6123, 250) ||
-                NetworkCameraScanner.isTcpPortOpen(apIp, 10002, 250) ||
-                NetworkCameraScanner.isTcpPortOpen(apIp, 8080, 250)
-            ) {
-                Log.d(TAG, "Cámara V720 detectada en modo AP directo: $apIp")
-                return@withContext apIp
+        // 4. Verificación de modo AP (únicamente si el teléfono está en esa subred AP)
+        if (localIp?.startsWith("192.168.169.") == true || localIp?.startsWith("192.168.4.") == true) {
+            for (apIp in listOf("192.168.169.1", "192.168.4.1")) {
+                if (NetworkCameraScanner.isTcpPortOpen(apIp, 80, 250) ||
+                    NetworkCameraScanner.isTcpPortOpen(apIp, 6123, 250) ||
+                    NetworkCameraScanner.isTcpPortOpen(apIp, 10002, 250) ||
+                    NetworkCameraScanner.isTcpPortOpen(apIp, 8080, 250)
+                ) {
+                    Log.d(TAG, "Cámara V720 detectada en modo AP directo: $apIp")
+                    return@withContext apIp
+                }
             }
         }
 

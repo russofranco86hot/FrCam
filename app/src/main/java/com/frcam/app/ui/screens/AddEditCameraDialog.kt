@@ -974,9 +974,10 @@ fun LanDiscoveryDialog(
     var selectedQrFormat by remember { mutableStateOf(QrWifiFormat.UNIVERSAL_WIFI) }
 
     // Estados para el aprovisionamiento de cámara nueva a Wi-Fi de casa
+    val (savedWifiSsid, savedWifiPass) = remember { CameraProvisioningEngine.getSavedWifiCredentials(context) }
     var targetApToProvision by remember { mutableStateOf<WaitingCameraAp?>(null) }
-    var homeWifiSsid by remember { mutableStateOf("") }
-    var homeWifiPassword by remember { mutableStateOf("") }
+    var homeWifiSsid by remember { mutableStateOf(savedWifiSsid) }
+    var homeWifiPassword by remember { mutableStateOf(savedWifiPass) }
     var showHomeWifiPassword by remember { mutableStateOf(false) }
 
     val isEmittingSound by CameraAcousticPairingEngine.isEmitting.collectAsState()
@@ -995,11 +996,14 @@ fun LanDiscoveryDialog(
         }
     }
 
-    // Auto-detectar SSID de la red Wi-Fi actual del móvil
+    // Auto-detectar SSID de la red Wi-Fi actual del móvil y restaurar credenciales
     LaunchedEffect(Unit) {
         val (curSsid, _) = CameraProvisioningEngine.getCurrentWifiConnection(context)
-        if (!curSsid.isNullOrBlank() && homeWifiSsid.isBlank()) {
+        if (!curSsid.isNullOrBlank()) {
             homeWifiSsid = curSsid
+            if (homeWifiPassword.isBlank() && savedWifiPass.isNotBlank()) {
+                homeWifiPassword = savedWifiPass
+            }
         }
     }
 
@@ -1292,23 +1296,44 @@ fun LanDiscoveryDialog(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    text = "Datos de tu red Wi-Fi de Casa (2.4 GHz):",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF38BDF8)
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Datos de tu red Wi-Fi de Casa (2.4 GHz):",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF38BDF8)
+                                    )
+                                    if (homeWifiSsid.isNotBlank()) {
+                                        Text(
+                                            text = "✓ Conectado a $homeWifiSsid",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFF34D399)
+                                        )
+                                    }
+                                }
                                 OutlinedTextField(
                                     value = homeWifiSsid,
-                                    onValueChange = { homeWifiSsid = it },
-                                    label = { Text("Nombre Wi-Fi de casa (SSID)") },
+                                    onValueChange = {
+                                        homeWifiSsid = it
+                                        CameraProvisioningEngine.saveWifiCredentials(context, it, homeWifiPassword)
+                                    },
+                                    label = { Text("Nombre Wi-Fi de casa (SSID 2.4 GHz)") },
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )
                                 OutlinedTextField(
                                     value = homeWifiPassword,
-                                    onValueChange = { homeWifiPassword = it },
-                                    label = { Text("Contraseña Wi-Fi de casa") },
+                                    onValueChange = {
+                                        homeWifiPassword = it
+                                        CameraProvisioningEngine.saveWifiCredentials(context, homeWifiSsid, it)
+                                    },
+                                    label = { Text("Contraseña de tu red Wi-Fi") },
+                                    placeholder = { Text("Clave para conectar la cámara a tu router") },
                                     singleLine = true,
                                     visualTransformation = if (showHomeWifiPassword) VisualTransformation.None else PasswordVisualTransformation(),
                                     trailingIcon = {
@@ -1318,6 +1343,13 @@ fun LanDiscoveryDialog(
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 )
+                                if (homeWifiPassword.isNotBlank()) {
+                                    Text(
+                                        text = "✓ Contraseña recordada para nuevas cámaras",
+                                        fontSize = 10.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1422,6 +1454,15 @@ fun LanDiscoveryDialog(
                                                 ) {
                                                     Button(
                                                         onClick = {
+                                                            if (homeWifiSsid.isBlank()) {
+                                                                Toast.makeText(context, "Por favor escribe el nombre de tu red Wi-Fi (SSID)", Toast.LENGTH_SHORT).show()
+                                                                return@Button
+                                                            }
+                                                            if (homeWifiPassword.isBlank()) {
+                                                                Toast.makeText(context, "Escribe la contraseña de tu Wi-Fi '$homeWifiSsid' para que la cámara se conecte.", Toast.LENGTH_LONG).show()
+                                                                return@Button
+                                                            }
+                                                            CameraProvisioningEngine.saveWifiCredentials(context, homeWifiSsid, homeWifiPassword)
                                                             isBleProvisioning = true
                                                             BluetoothCameraEngine.provisionWifiOverBle(
                                                                 context = context,
@@ -1432,13 +1473,28 @@ fun LanDiscoveryDialog(
                                                                 onResult = { res ->
                                                                     res.onSuccess { msg ->
                                                                         coroutineScope.launch {
-                                                                            Toast.makeText(context, "$msg. Buscando IP...", Toast.LENGTH_SHORT).show()
-                                                                            delay(3500L)
-                                                                            val ip = BluetoothCameraEngine.resolveV720Ip(dev)
+                                                                            Toast.makeText(context, "$msg Conectando al router...", Toast.LENGTH_SHORT).show()
+                                                                            var resolvedIp: String? = null
+                                                                            for (attempt in 1..5) {
+                                                                                delay(2000L)
+                                                                                val ip = BluetoothCameraEngine.resolveV720Ip(dev)
+                                                                                if (ip != null) {
+                                                                                    resolvedIp = ip
+                                                                                    break
+                                                                                }
+                                                                            }
                                                                             isBleProvisioning = false
-                                                                            val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = ip ?: "192.168.169.1")
-                                                                            Toast.makeText(context, if (ip != null) "¡Cámara vinculada en $ip!" else "Cámara vinculada.", Toast.LENGTH_SHORT).show()
-                                                                            onAddBleCamera?.invoke(cfg)
+                                                                            if (resolvedIp != null) {
+                                                                                val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = resolvedIp)
+                                                                                Toast.makeText(context, "¡Cámara V720 conectada a tu Wi-Fi en $resolvedIp! (Luz azul fija)", Toast.LENGTH_LONG).show()
+                                                                                onAddBleCamera?.invoke(cfg)
+                                                                            } else {
+                                                                                Toast.makeText(
+                                                                                    context,
+                                                                                    "Credenciales enviadas a la cámara. Si la luz azul aún parpadea rápido, verifica la contraseña de tu red Wi-Fi 2.4 GHz.",
+                                                                                    Toast.LENGTH_LONG
+                                                                                ).show()
+                                                                            }
                                                                         }
                                                                     }.onFailure { err ->
                                                                         isBleProvisioning = false
@@ -1447,17 +1503,17 @@ fun LanDiscoveryDialog(
                                                                 }
                                                             )
                                                         },
-                                                        enabled = homeWifiSsid.isNotBlank() && !isBleProvisioning,
-                                                        modifier = Modifier.weight(1f),
+                                                        enabled = !isBleProvisioning,
+                                                        modifier = Modifier.weight(1.2f),
                                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669))
                                                     ) {
-                                                        Text(if (isBleProvisioning) "Vinculando..." else "Vincular a mi Wi-Fi", fontSize = 11.sp)
+                                                        Text(if (isBleProvisioning) "Vinculando..." else "Vincular a mi Wi-Fi", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                                     }
                                                     OutlinedButton(
                                                         onClick = {
                                                             coroutineScope.launch {
                                                                 isBleProvisioning = true
-                                                                Toast.makeText(context, "Buscando IP de la cámara en tu red Wi-Fi...", Toast.LENGTH_SHORT).show()
+                                                                Toast.makeText(context, "Buscando cámara V720 en tu router Wi-Fi...", Toast.LENGTH_SHORT).show()
                                                                 val ip = BluetoothCameraEngine.resolveV720Ip(dev)
                                                                 isBleProvisioning = false
                                                                 if (ip != null) {
@@ -1465,16 +1521,18 @@ fun LanDiscoveryDialog(
                                                                     val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = ip)
                                                                     onAddBleCamera?.invoke(cfg)
                                                                 } else {
-                                                                    Toast.makeText(context, "Cámara V720 agregada. Si aún no está en Wi-Fi, pulsa 'Vincular a mi Wi-Fi'.", Toast.LENGTH_LONG).show()
-                                                                    val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = "192.168.169.1")
-                                                                    onAddBleCamera?.invoke(cfg)
+                                                                    Toast.makeText(
+                                                                        context,
+                                                                        "La cámara no se detectó en tu Wi-Fi (luz azul parpadeando rápido). Pulsa 'Vincular a mi Wi-Fi' para enviarle la red.",
+                                                                        Toast.LENGTH_LONG
+                                                                    ).show()
                                                                 }
                                                             }
                                                         },
                                                         enabled = !isBleProvisioning,
-                                                        modifier = Modifier.weight(1f)
+                                                        modifier = Modifier.weight(0.9f)
                                                     ) {
-                                                        Text("Agregar a FrCam", fontSize = 11.sp)
+                                                        Text("Buscar IP", fontSize = 11.sp)
                                                     }
                                                 }
                                             }
