@@ -30,6 +30,11 @@ import com.frcam.app.model.StreamProtocol
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import java.util.UUID
 
 data class DiscoveredBleCamera(
@@ -386,5 +391,112 @@ object BluetoothCameraEngine {
             ptzType = PtzControlType.NONE,
             autoRecordMode = "OFF"
         )
+    }
+
+    /**
+     * Consulta la tabla de vecinos ARP del sistema para obtener correlaciones IP <-> MAC.
+     */
+    fun getArpTable(): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        try {
+            java.io.File("/proc/net/arp").forEachLine { line ->
+                val parts = line.split("\\s+".toRegex())
+                if (parts.size >= 4 && parts[0] != "IP") {
+                    val ip = parts[0]
+                    val mac = parts[3].lowercase()
+                    if (mac != "00:00:00:00:00:00" && mac.length >= 17) {
+                        map[ip] = mac
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        if (map.isEmpty()) {
+            try {
+                val process = Runtime.getRuntime().exec("ip neigh")
+                process.inputStream.bufferedReader().useLines { lines ->
+                    for (line in lines) {
+                        val parts = line.split("\\s+".toRegex())
+                        val ip = parts.getOrNull(0) ?: continue
+                        val lladdrIndex = parts.indexOf("lladdr")
+                        if (lladdrIndex != -1 && lladdrIndex + 1 < parts.size) {
+                            val mac = parts[lladdrIndex + 1].lowercase()
+                            if (mac != "00:00:00:00:00:00") {
+                                map[ip] = mac
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        return map
+    }
+
+    /**
+     * Resuelve automáticamente la dirección IP local de la cámara V720 en la red Wi-Fi
+     * mediante búsqueda ARP por MAC, broadcast UDP y escaneo rápido de puertos V720 (6123/10002).
+     */
+    suspend fun resolveV720Ip(bleCamera: DiscoveredBleCamera? = null): String? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val targetMac = bleCamera?.address?.lowercase()?.trim()
+
+        // 1. Match en tabla ARP por dirección MAC de la cámara Bluetooth
+        if (!targetMac.isNullOrBlank()) {
+            val cleanTarget = targetMac.replace(":", "").replace("-", "")
+            val arp = getArpTable()
+            for ((ip, mac) in arp) {
+                val cleanMac = mac.replace(":", "").replace("-", "")
+                if (cleanMac == cleanTarget || (cleanMac.length >= 6 && cleanTarget.length >= 6 && cleanMac.takeLast(6) == cleanTarget.takeLast(6))) {
+                    Log.d(TAG, "Cámara V720 encontrada en tabla ARP: $ip ($mac)")
+                    return@withContext ip
+                }
+            }
+        }
+
+        // 2. Búsqueda por Broadcast UDP
+        val udpDevices = NetworkCameraScanner.discoverV720ViaUdpBroadcast()
+        if (udpDevices.isNotEmpty()) {
+            val ip = udpDevices.first().ipAddress
+            Log.d(TAG, "Cámara V720 encontrada por broadcast UDP: $ip")
+            return@withContext ip
+        }
+
+        // 3. Barrido concurrente de la subred local en puertos específicos V720
+        val localIp = NetworkCameraScanner.getLocalIpv4Address()
+        val subnetPrefix = localIp?.substringBeforeLast(".").orEmpty()
+        if (subnetPrefix.isNotBlank()) {
+            val v720Ports = listOf(6123, 10002, 10003, 16123, 6600, 6001, 8080, 80)
+            val foundIp = coroutineScope {
+                (1..254).map { octet ->
+                    async {
+                        val ip = "$subnetPrefix.$octet"
+                        if (ip == localIp || ip.endsWith(".1") || ip.endsWith(".254")) return@async null
+                        for (port in v720Ports) {
+                            if (NetworkCameraScanner.isTcpPortOpen(ip, port, timeoutMs = 300)) {
+                                return@async ip
+                            }
+                        }
+                        null
+                    }
+                }.awaitAll().filterNotNull().firstOrNull()
+            }
+            if (foundIp != null) {
+                Log.d(TAG, "Cámara V720 detectada en barrido de subred: $foundIp")
+                return@withContext foundIp
+            }
+        }
+
+        // 4. Verificación de modo AP (cuando el teléfono está conectado al Wi-Fi de la cámara)
+        for (apIp in listOf("192.168.169.1", "192.168.4.1")) {
+            if (NetworkCameraScanner.isTcpPortOpen(apIp, 80, 250) ||
+                NetworkCameraScanner.isTcpPortOpen(apIp, 6123, 250) ||
+                NetworkCameraScanner.isTcpPortOpen(apIp, 10002, 250) ||
+                NetworkCameraScanner.isTcpPortOpen(apIp, 8080, 250)
+            ) {
+                Log.d(TAG, "Cámara V720 detectada en modo AP directo: $apIp")
+                return@withContext apIp
+            }
+        }
+
+        null
     }
 }

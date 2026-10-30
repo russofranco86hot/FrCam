@@ -21,6 +21,7 @@ import com.frcam.app.media.CameraMediaEngine
 import com.frcam.app.media.MotionEventRecord
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -199,7 +200,12 @@ fun AddEditCameraSheet(
     var showV380IniDialog by remember { mutableStateOf(false) }
 
     fun buildCurrentConfig(): CameraConfig {
-        val labelSuffix = if (deviceId.isNotBlank()) deviceId else host
+        val resolvedHost = if (selectedBrand == CameraBrand.V720_NAXCLOW && host.isBlank()) {
+            "192.168.169.1"
+        } else {
+            host.trim()
+        }
+        val labelSuffix = if (deviceId.isNotBlank()) deviceId else resolvedHost
         return CameraConfig(
             id = initialCamera?.id ?: UUID.randomUUID().toString(),
             name = name.ifBlank { "${selectedBrand.displayName} ($labelSuffix)" },
@@ -207,7 +213,7 @@ fun AddEditCameraSheet(
             connectionMode = connectionMode,
             deviceId = deviceId.trim(),
             modelCode = modelCode.trim(),
-            host = host.trim(),
+            host = resolvedHost,
             remoteHost = initialCamera?.remoteHost.orEmpty(),
             remoteRtspPort = initialCamera?.remoteRtspPort ?: 0,
             remoteHttpPort = initialCamera?.remoteHttpPort ?: 0,
@@ -585,8 +591,10 @@ fun AddEditCameraSheet(
                     onTestConnection(cfg) { resolvedUri ->
                         val afterScheme = resolvedUri.substringAfter("://")
                         val hostPortPath = afterScheme.substringAfter("@", afterScheme)
+                        val detectedHost = hostPortPath.substringBefore("/").substringBefore(":")
                         val detectedPort = hostPortPath.substringBefore("/").substringAfter(":", "")
                         val detectedPath = "/" + hostPortPath.substringAfter("/", "")
+                        if (host.isBlank() && detectedHost.isNotBlank()) host = detectedHost
                         if (detectedPort.isNotBlank()) rtspPortText = detectedPort
                         if (detectedPath.length > 1) mainPath = detectedPath
                     }
@@ -1422,12 +1430,18 @@ fun LanDiscoveryDialog(
                                                                 pass = homeWifiPassword,
                                                                 onStatus = { /* actualizado por StateFlow */ },
                                                                 onResult = { res ->
-                                                                    isBleProvisioning = false
                                                                     res.onSuccess { msg ->
-                                                                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                                                                        val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev)
-                                                                        onAddBleCamera?.invoke(cfg)
+                                                                        coroutineScope.launch {
+                                                                            Toast.makeText(context, "$msg. Buscando IP...", Toast.LENGTH_SHORT).show()
+                                                                            delay(3500L)
+                                                                            val ip = BluetoothCameraEngine.resolveV720Ip(dev)
+                                                                            isBleProvisioning = false
+                                                                            val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = ip ?: "192.168.169.1")
+                                                                            Toast.makeText(context, if (ip != null) "¡Cámara vinculada en $ip!" else "Cámara vinculada.", Toast.LENGTH_SHORT).show()
+                                                                            onAddBleCamera?.invoke(cfg)
+                                                                        }
                                                                     }.onFailure { err ->
+                                                                        isBleProvisioning = false
                                                                         Toast.makeText(context, err.message ?: "Error vinculando por Bluetooth", Toast.LENGTH_LONG).show()
                                                                     }
                                                                 }
@@ -1441,9 +1455,23 @@ fun LanDiscoveryDialog(
                                                     }
                                                     OutlinedButton(
                                                         onClick = {
-                                                            val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev)
-                                                            onAddBleCamera?.invoke(cfg)
+                                                            coroutineScope.launch {
+                                                                isBleProvisioning = true
+                                                                Toast.makeText(context, "Buscando IP de la cámara en tu red Wi-Fi...", Toast.LENGTH_SHORT).show()
+                                                                val ip = BluetoothCameraEngine.resolveV720Ip(dev)
+                                                                isBleProvisioning = false
+                                                                if (ip != null) {
+                                                                    Toast.makeText(context, "¡Cámara V720 detectada en $ip!", Toast.LENGTH_SHORT).show()
+                                                                    val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = ip)
+                                                                    onAddBleCamera?.invoke(cfg)
+                                                                } else {
+                                                                    Toast.makeText(context, "Cámara V720 agregada. Si aún no está en Wi-Fi, pulsa 'Vincular a mi Wi-Fi'.", Toast.LENGTH_LONG).show()
+                                                                    val cfg = BluetoothCameraEngine.createCameraConfigFromBle(dev, hostIp = "192.168.169.1")
+                                                                    onAddBleCamera?.invoke(cfg)
+                                                                }
+                                                            }
                                                         },
+                                                        enabled = !isBleProvisioning,
                                                         modifier = Modifier.weight(1f)
                                                     ) {
                                                         Text("Agregar a FrCam", fontSize = 11.sp)

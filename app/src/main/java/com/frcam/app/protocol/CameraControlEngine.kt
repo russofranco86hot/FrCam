@@ -526,14 +526,29 @@ object CameraControlEngine {
                 }
             }
 
-            val host = camera.host.trim()
+            var host = camera.host.trim()
             if (host.isBlank()) {
-                return@withContext ConnectionDiagnosticResult(
-                    success = false,
-                    resolvedStreamUrl = null,
-                    summary = "Ingresa la dirección IP o el ID de dispositivo de la cámara",
-                    details = listOf("Falta la dirección IP o el ID de nube.")
-                )
+                if (camera.brand == CameraBrand.V720_NAXCLOW) {
+                    val autoIp = BluetoothCameraEngine.resolveV720Ip()
+                    if (autoIp != null) {
+                        host = autoIp
+                        details.add("IP de cámara V720 detectada automáticamente: $host")
+                    } else {
+                        return@withContext ConnectionDiagnosticResult(
+                            success = false,
+                            resolvedStreamUrl = null,
+                            summary = "Cámara V720 no encontrada en la red local",
+                            details = listOf("Asegúrate de que la cámara esté encendida y conectada al router Wi-Fi.")
+                        )
+                    }
+                } else {
+                    return@withContext ConnectionDiagnosticResult(
+                        success = false,
+                        resolvedStreamUrl = null,
+                        summary = "Ingresa la dirección IP o el ID de dispositivo de la cámara",
+                        details = listOf("Falta la dirección IP o el ID de nube.")
+                    )
+                }
             }
 
             val portsToCheck = listOf(
@@ -545,11 +560,17 @@ object CameraControlEngine {
                 8800,
                 8899,
                 6123,
+                10002,
+                10003,
                 10080,
                 8554,
                 80,
                 81,
-                8080
+                8080,
+                8888,
+                6600,
+                6001,
+                5000
             ).distinct()
 
             val openPorts = portsToCheck.filter { NetworkCameraScanner.isTcpPortOpen(host, it, 400) }
@@ -590,6 +611,17 @@ object CameraControlEngine {
                             details = details
                         )
                     }
+                } else if (candidateUrl.startsWith("http://") || candidateUrl.startsWith("https://")) {
+                    val httpProbe = probeHttpStreamUrl(candidateUrl)
+                    if (httpProbe.first) {
+                        details.add("Stream HTTP/MJPEG verificado ($candidateUrl): ${httpProbe.second}")
+                        return@withContext ConnectionDiagnosticResult(
+                            success = true,
+                            resolvedStreamUrl = candidateUrl,
+                            summary = "Stream HTTP/MJPEG activo y verificado",
+                            details = details
+                        )
+                    }
                 }
             }
 
@@ -600,6 +632,28 @@ object CameraControlEngine {
                 details = details
             )
         }
+
+    private fun probeHttpStreamUrl(httpUrl: String): Pair<Boolean, String> {
+        return try {
+            val url = java.net.URL(httpUrl)
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 800
+            conn.readTimeout = 800
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("User-Agent", "FrCam/1.0")
+            conn.setRequestProperty("Accept", "*/*")
+            val code = conn.responseCode
+            val contentType = conn.contentType.orEmpty()
+            conn.disconnect()
+            if (code in 200..299 || code == 401 || contentType.contains("image") || contentType.contains("video")) {
+                true to "HTTP $code $contentType"
+            } else {
+                false to "HTTP $code"
+            }
+        } catch (e: Exception) {
+            false to (e.message ?: "Sin respuesta HTTP")
+        }
+    }
 
     private fun probeRtspUrl(rtspUrl: String): Pair<Boolean, String> {
         return try {
