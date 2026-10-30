@@ -351,10 +351,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         addOrUpdateCamera(cfg)
     }
 
-    fun toggleMotionDetection(cameraId: String, enabled: Boolean) {
+    fun toggleMotionDetection(cameraId: String, enabled: Boolean, autoRecord: String? = null) {
         viewModelScope.launch {
             val list = cameras.value.map { cam ->
-                if (cam.id == cameraId) cam.copy(motionDetectionEnabled = enabled) else cam
+                if (cam.id == cameraId) {
+                    cam.copy(
+                        motionDetectionEnabled = enabled,
+                        autoRecordMode = autoRecord ?: (if (enabled) "GIF" else "OFF")
+                    )
+                } else cam
             }
             repository.saveCameras(list)
         }

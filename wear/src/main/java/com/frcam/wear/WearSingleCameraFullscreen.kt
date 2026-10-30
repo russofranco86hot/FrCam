@@ -36,6 +36,8 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -66,7 +68,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.frcam.app.model.CameraConfig
+import com.google.android.gms.wearable.Wearable
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * Vista individual a PANTALLA COMPLETA TOTAL para Wear OS.
@@ -98,6 +106,9 @@ fun WearSingleCameraFullscreen(
     var offset by remember(currentIndex) { mutableStateOf(Offset.Zero) }
 
     var isMuted by remember(currentIndex) { mutableStateOf(true) }
+    var isMotionActive by remember(currentCamera.id) {
+        mutableStateOf(currentCamera.motionDetectionEnabled && currentCamera.autoRecordMode != "OFF")
+    }
 
     // Motor de audio bidireccional (Micrófono)
     val broadcaster = remember { WearIntercomBroadcaster(context) }
@@ -279,13 +290,13 @@ fun WearSingleCameraFullscreen(
                     )
                 }
 
-                // 2. Fila principal de acciones centrada a y=38dp (Volver, Parlante, Micrófono)
-                // En y=38dp una pantalla redonda tiene más de 156dp de ancho, permitiendo ver y pulsar los 3 botones sin corte
+                // 2. Fila principal de acciones centrada a y=38dp (Volver, Alertas/GIF, Parlante, Micrófono)
+                // En y=38dp una pantalla redonda tiene más de 156dp de ancho; 4 botones de 30dp ocupan 144dp con margen seguro
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 38.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Botón Volver a cuadrícula
@@ -295,7 +306,7 @@ fun WearSingleCameraFullscreen(
                             onBackToGrid()
                         },
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(30.dp)
                             .background(Color.Black.copy(alpha = 0.85f), CircleShape)
                             .border(1.dp, Color(0xFF334155), CircleShape)
                     ) {
@@ -303,7 +314,74 @@ fun WearSingleCameraFullscreen(
                             imageVector = Icons.Default.GridView,
                             contentDescription = "Ver todas las cámaras",
                             tint = Color.White,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    // Botón Alertas de Movimiento y Grabación GIF en Celular
+                    IconButton(
+                        onClick = {
+                            val next = !isMotionActive
+                            isMotionActive = next
+                            val phoneHost = (WearCameraStorage.lastKnownPhoneIp ?: currentCamera.remoteHost.ifBlank { currentCamera.host })
+                                .trim().removePrefix("http://").substringBefore(":")
+
+                            scope.launch(Dispatchers.IO) {
+                                // 1. Guardar localmente en el reloj
+                                val updated = cameras.map {
+                                    if (it.id == currentCamera.id) it.copy(
+                                        motionDetectionEnabled = next,
+                                        autoRecordMode = if (next) "GIF" else "OFF"
+                                    ) else it
+                                }
+                                WearCameraStorage.saveCameras(context, updated)
+
+                                // 2. Enviar por HTTP al celular si está en la misma red
+                                if (phoneHost.isNotBlank()) {
+                                    try {
+                                        val url = "http://$phoneHost:49880/set_motion?id=${currentCamera.id}&enabled=$next"
+                                        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                                            connectTimeout = 2000
+                                            readTimeout = 2000
+                                        }
+                                        conn.responseCode
+                                        conn.disconnect()
+                                    } catch (_: Exception) {}
+                                }
+
+                                // 3. Enviar por canal Bluetooth Wearable MessageClient
+                                try {
+                                    val payload = "${currentCamera.id}:$next".toByteArray(Charsets.UTF_8)
+                                    val nodes = Wearable.getNodeClient(context).connectedNodes.await()
+                                    nodes.forEach { node ->
+                                        Wearable.getMessageClient(context).sendMessage(node.id, "/frcam/set_motion", payload).await()
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            Toast.makeText(
+                                context,
+                                if (next) "Alertas y GIF activados en celular" else "Alertas desactivadas",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        modifier = Modifier
+                            .size(30.dp)
+                            .background(
+                                if (isMotionActive) Color(0xFF064E3B).copy(alpha = 0.90f) else Color.Black.copy(alpha = 0.85f),
+                                CircleShape
+                            )
+                            .border(
+                                1.dp,
+                                if (isMotionActive) Color(0xFF10B981) else Color(0xFF334155),
+                                CircleShape
+                            )
+                    ) {
+                        Icon(
+                            imageVector = if (isMotionActive) Icons.Default.NotificationsActive else Icons.Default.NotificationsOff,
+                            contentDescription = if (isMotionActive) "Desactivar alertas" else "Activar alertas y GIF",
+                            tint = if (isMotionActive) Color(0xFF34D399) else Color(0xFF94A3B8),
+                            modifier = Modifier.size(16.dp)
                         )
                     }
 
@@ -313,7 +391,7 @@ fun WearSingleCameraFullscreen(
                             isMuted = !isMuted
                         },
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(30.dp)
                             .background(Color.Black.copy(alpha = 0.85f), CircleShape)
                             .border(1.dp, Color(0xFF334155), CircleShape)
                     ) {
@@ -321,7 +399,7 @@ fun WearSingleCameraFullscreen(
                             imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                             contentDescription = if (isMuted) "Activar sonido" else "Silenciar",
                             tint = if (isMuted) Color(0xFF94A3B8) else Color(0xFF38BDF8),
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
 
@@ -342,7 +420,7 @@ fun WearSingleCameraFullscreen(
                             }
                         },
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(30.dp)
                             .background(
                                 if (isBroadcasting) Color(0xFFDC2626) else Color.Black.copy(alpha = 0.85f),
                                 CircleShape
@@ -357,7 +435,7 @@ fun WearSingleCameraFullscreen(
                             imageVector = if (isBroadcasting) Icons.Default.Mic else Icons.Default.MicOff,
                             contentDescription = if (isBroadcasting) "Detener micrófono" else "Hablar por cámara",
                             tint = if (isBroadcasting) Color.White else Color(0xFFF59E0B),
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }

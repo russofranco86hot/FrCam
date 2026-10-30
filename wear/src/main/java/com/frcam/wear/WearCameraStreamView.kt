@@ -113,7 +113,7 @@ fun WearCameraStreamView(
         contentAlignment = Alignment.Center
     ) {
         when {
-            // 1. Cámaras Ring Cloud (Transmisión continua de alta velocidad 100% nativa)
+            // 1. Cámaras Ring Cloud (Streaming MJPEG en tiempo real + Snapshots dinámicos)
             isRing -> {
                 LaunchedEffect(camera.id, retryKey) {
                     isConnecting = true
@@ -125,71 +125,78 @@ fun WearCameraStreamView(
                         .trim().removePrefix("http://").substringBefore(":")
 
                     var failCount = 0
+                    var updateCounter = 0
 
                     while (isActive) {
                         try {
-                            val bmp = withContext(Dispatchers.IO) {
-                                val now = System.currentTimeMillis()
+                            // Flujo 1: Si hay servidor del celular, conectar al stream continuo MJPEG en vivo (4-5 FPS)
+                            val streamUrl = if (!snapUrl.isNullOrBlank() && snapUrl.contains("ring_stream")) {
+                                snapUrl
+                            } else if (doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
+                                "http://$phoneHost:49880/ring_stream?id=$doorbotId"
+                            } else null
 
-                                // Opción A: URL directa personalizada o proxy (e.g. http://$phoneIp:49880/ring_snapshot?id=...)
-                                if (!snapUrl.isNullOrBlank()) {
-                                    try {
-                                        val conn = (URL(snapUrl).openConnection() as HttpURLConnection).apply {
-                                            connectTimeout = 2000
-                                            readTimeout = 2500
-                                            setRequestProperty("Accept", "image/jpeg, */*")
+                            var streamSuccess = false
+                            if (!streamUrl.isNullOrBlank()) {
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        val conn = (URL(streamUrl).openConnection() as HttpURLConnection).apply {
+                                            connectTimeout = 3000
+                                            readTimeout = 4000
                                         }
                                         if (conn.responseCode in 200..299) {
-                                            val bytes = conn.inputStream.readBytes()
-                                            conn.disconnect()
-                                            if (bytes.isNotEmpty()) {
-                                                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                if (decoded != null) return@withContext decoded
-                                            }
-                                        } else {
-                                            conn.disconnect()
-                                        }
-                                    } catch (_: Exception) {}
-                                }
+                                            streamSuccess = true
+                                            failCount = 0
+                                            val input = BufferedInputStream(conn.inputStream, 16384)
+                                            val buffer = ByteArrayOutputStream(65536)
+                                            var prevByte = -1
+                                            var capturing = false
 
-                                // Opción B: Consultar servidor local del celular en LAN (puerto 49880)
-                                if (doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
-                                    try {
-                                        val conn = (URL("http://$phoneHost:49880/ring_snapshot?id=$doorbotId")
-                                            .openConnection() as HttpURLConnection).apply {
-                                            connectTimeout = 2000
-                                            readTimeout = 2500
-                                            setRequestProperty("Accept", "image/jpeg, */*")
-                                        }
-                                        if (conn.responseCode in 200..299) {
-                                            val bytes = conn.inputStream.readBytes()
-                                            conn.disconnect()
-                                            if (bytes.isNotEmpty()) {
-                                                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                if (decoded != null) return@withContext decoded
+                                            while (isActive) {
+                                                val b = input.read()
+                                                if (b == -1) break
+                                                if (!capturing) {
+                                                    if (prevByte == 0xFF && b == 0xD8) {
+                                                        capturing = true
+                                                        buffer.reset()
+                                                        buffer.write(0xFF)
+                                                        buffer.write(0xD8)
+                                                    }
+                                                } else {
+                                                    buffer.write(b)
+                                                    if (prevByte == 0xFF && b == 0xD9) {
+                                                        val jpegBytes = buffer.toByteArray()
+                                                        val streamBmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+                                                        if (streamBmp != null) {
+                                                            withContext(Dispatchers.Main) {
+                                                                currentBitmap = streamBmp
+                                                                isConnecting = false
+                                                                errorMessage = null
+                                                            }
+                                                        }
+                                                        capturing = false
+                                                    }
+                                                }
+                                                prevByte = b
                                             }
-                                        } else {
-                                            conn.disconnect()
                                         }
-                                    } catch (_: Exception) {}
-                                }
+                                        conn.disconnect()
+                                    }
+                                } catch (_: Exception) {}
+                            }
 
-                                // Opción C: Consultar endpoints oficiales de Ring Cloud con Bearer Token
-                                if (doorbotId > 0L && token.isNotBlank()) {
-                                    val endpoints = listOf(
-                                        "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now",
-                                        "https://app-snaps.ring.com/next/$doorbotId?_t=$now",
-                                        "https://api.ring.com/v1/devices/$doorbotId/media/image/download?_t=$now"
-                                    )
-                                    for (endpoint in endpoints) {
+                            // Flujo 2: Si el stream continuo no está disponible, consultar frame individual
+                            if (!streamSuccess) {
+                                val bmp = withContext(Dispatchers.IO) {
+                                    val now = System.currentTimeMillis()
+
+                                    // Opción A: Servidor local del celular en LAN (/ring_snapshot)
+                                    if (doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
                                         try {
-                                            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                                                connectTimeout = 3000
-                                                readTimeout = 3000
-                                                useCaches = false
-                                                setRequestProperty("Authorization", "Bearer $token")
-                                                setRequestProperty("User-Agent", "android:com.ringapp")
-                                                setRequestProperty("Cache-Control", "no-cache")
+                                            val conn = (URL("http://$phoneHost:49880/ring_snapshot?id=$doorbotId")
+                                                .openConnection() as HttpURLConnection).apply {
+                                                connectTimeout = 1800
+                                                readTimeout = 2000
                                                 setRequestProperty("Accept", "image/jpeg, */*")
                                             }
                                             if (conn.responseCode in 200..299) {
@@ -204,20 +211,68 @@ fun WearCameraStreamView(
                                             }
                                         } catch (_: Exception) {}
                                     }
+
+                                    // Opción B: Ring Cloud directo con trigger periódico de actualización
+                                    if (doorbotId > 0L && token.isNotBlank()) {
+                                        if (updateCounter++ % 3 == 0) {
+                                            try {
+                                                val upConn = (URL("https://api.ring.com/clients_api/snapshots/update_all").openConnection() as HttpURLConnection).apply {
+                                                    connectTimeout = 2000
+                                                    readTimeout = 2000
+                                                    requestMethod = "PUT"
+                                                    doOutput = true
+                                                    setRequestProperty("Content-Type", "application/json")
+                                                    setRequestProperty("Authorization", "Bearer $token")
+                                                    setRequestProperty("User-Agent", "android:com.ringapp")
+                                                    outputStream.use { it.write("""{"doorbot_ids":[$doorbotId],"update_all":true}""".toByteArray()) }
+                                                }
+                                                upConn.responseCode
+                                                upConn.disconnect()
+                                            } catch (_: Exception) {}
+                                        }
+
+                                        val endpoints = listOf(
+                                            "https://api.ring.com/clients_api/snapshots/image/$doorbotId?_ts=$now",
+                                            "https://app-snaps.ring.com/next/$doorbotId?_t=$now"
+                                        )
+                                        for (endpoint in endpoints) {
+                                            try {
+                                                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                                                    connectTimeout = 2500
+                                                    readTimeout = 2500
+                                                    useCaches = false
+                                                    setRequestProperty("Authorization", "Bearer $token")
+                                                    setRequestProperty("User-Agent", "android:com.ringapp")
+                                                    setRequestProperty("Cache-Control", "no-cache")
+                                                    setRequestProperty("Accept", "image/jpeg, */*")
+                                                }
+                                                if (conn.responseCode in 200..299) {
+                                                    val bytes = conn.inputStream.readBytes()
+                                                    conn.disconnect()
+                                                    if (bytes.isNotEmpty()) {
+                                                        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                                        if (decoded != null) return@withContext decoded
+                                                    }
+                                                } else {
+                                                    conn.disconnect()
+                                                }
+                                            } catch (_: Exception) {}
+                                        }
+                                    }
+
+                                    null
                                 }
 
-                                null
-                            }
-
-                            if (bmp != null) {
-                                currentBitmap = bmp
-                                isConnecting = false
-                                errorMessage = null
-                                failCount = 0
-                            } else {
-                                failCount++
-                                if (currentBitmap == null && failCount > 4) {
-                                    errorMessage = "Sin conexión a Ring"
+                                if (bmp != null) {
+                                    currentBitmap = bmp
+                                    isConnecting = false
+                                    errorMessage = null
+                                    failCount = 0
+                                } else {
+                                    failCount++
+                                    if (currentBitmap == null && failCount > 4) {
+                                        errorMessage = "Sin conexión a Ring"
+                                    }
                                 }
                             }
                         } catch (e: Exception) {
@@ -226,8 +281,8 @@ fun WearCameraStreamView(
                                 errorMessage = e.message ?: "Error conectando con Ring"
                             }
                         }
-                        // Refresco fluido: cada 900 ms para ver movimientos reales
-                        delay(900L)
+                        // Reintento o pausa entre ciclos si no hay stream activo
+                        delay(400L)
                     }
                 }
 

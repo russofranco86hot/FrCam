@@ -11,6 +11,7 @@ import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
@@ -46,6 +47,9 @@ object PhoneWearSyncEngine {
     @Volatile
     private var cachedCameras: List<CameraConfig> = emptyList()
 
+    @Volatile
+    var onToggleMotion: ((String, Boolean, String) -> Unit)? = null
+
     /**
      * Inicia los servidores locales (HTTP + UDP) en el celular para sincronización directa por Wi-Fi.
      */
@@ -66,6 +70,68 @@ object PhoneWearSyncEngine {
                             val reader = BufferedReader(InputStreamReader(client.getInputStream()))
                             val firstLine = reader.readLine() ?: ""
                             Log.d(TAG, "Petición HTTP recibida desde ${client.inetAddress.hostAddress}: $firstLine")
+
+                            if (firstLine.contains("/set_motion")) {
+                                val id = Regex("""[?&]id=([^&\s]+)""").find(firstLine)?.groupValues?.get(1).orEmpty()
+                                val enabled = Regex("""[?&]enabled=(true|false)""").find(firstLine)?.groupValues?.get(1)?.toBoolean() ?: true
+                                val recordMode = if (enabled) "GIF" else "OFF"
+                                onToggleMotion?.invoke(id, enabled, recordMode)
+                                val resp = """{"status":"ok","id":"$id","motion":$enabled,"recordMode":"$recordMode"}"""
+                                val out = client.getOutputStream()
+                                val header = "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: application/json; charset=utf-8\r\n" +
+                                        "Content-Length: ${resp.length}\r\n" +
+                                        "Connection: close\r\n\r\n"
+                                out.write(header.toByteArray(Charsets.UTF_8))
+                                out.write(resp.toByteArray(Charsets.UTF_8))
+                                out.flush()
+                                client.close()
+                                return@launch
+                            }
+
+                            if (firstLine.contains("/ring_stream")) {
+                                val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
+                                val id = idStr?.toLongOrNull() ?: 0L
+                                if (id > 0L) {
+                                    val out = client.getOutputStream()
+                                    val boundary = "frame_boundary"
+                                    val header = "HTTP/1.1 200 OK\r\n" +
+                                            "Content-Type: multipart/x-mixed-replace; boundary=$boundary\r\n" +
+                                            "Cache-Control: no-cache, no-store, must-revalidate\r\n" +
+                                            "Pragma: no-cache\r\n" +
+                                            "Connection: close\r\n\r\n"
+                                    out.write(header.toByteArray(Charsets.UTF_8))
+                                    out.flush()
+
+                                    // Despertar cámara en segundo plano
+                                    com.frcam.app.protocol.RingCloudClient.wakeLiveStream(id)
+
+                                    try {
+                                        while (!client.isClosed && client.isConnected) {
+                                            val liveBmp = com.frcam.app.protocol.RingCloudClient.getLiveFrame(id)
+                                            val bmp = liveBmp ?: com.frcam.app.protocol.RingCloudClient.getCachedSnapshot(id)?.bitmap
+                                            if (bmp != null) {
+                                                val bos = java.io.ByteArrayOutputStream()
+                                                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 65, bos)
+                                                val imgBytes = bos.toByteArray()
+                                                val partHeader = "--$boundary\r\n" +
+                                                        "Content-Type: image/jpeg\r\n" +
+                                                        "Content-Length: ${imgBytes.size}\r\n\r\n"
+                                                out.write(partHeader.toByteArray(Charsets.UTF_8))
+                                                out.write(imgBytes)
+                                                out.write("\r\n".toByteArray(Charsets.UTF_8))
+                                                out.flush()
+                                            } else {
+                                                com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)
+                                            }
+                                            // Refresco a 4 FPS para movimiento en vivo real
+                                            delay(250L)
+                                        }
+                                    } catch (_: Exception) {}
+                                    try { client.close() } catch (_: Exception) {}
+                                    return@launch
+                                }
+                            }
 
                             if (firstLine.contains("/ring_ticket")) {
                                 val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
@@ -321,6 +387,16 @@ object PhoneWearSyncEngine {
                 Log.d(TAG, "Solicitud de sincronización recibida desde el reloj (${messageEvent.sourceNodeId})")
                 val cams = getCameras().ifEmpty { cachedCameras }
                 syncCamerasToWatch(context, cams, targetNodeId = messageEvent.sourceNodeId)
+            } else if (messageEvent.path == "/frcam/set_motion") {
+                try {
+                    val text = String(messageEvent.data, Charsets.UTF_8)
+                    val parts = text.split(":")
+                    if (parts.size >= 2) {
+                        val id = parts[0]
+                        val enabled = parts[1].toBoolean()
+                        onToggleMotion?.invoke(id, enabled, if (enabled) "GIF" else "OFF")
+                    }
+                } catch (_: Exception) {}
             }
         }
         Wearable.getMessageClient(context).addListener(listener)

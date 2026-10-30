@@ -304,7 +304,7 @@ function startCapture(){
       c.getContext('2d').drawImage(videoEl, 0, 0, w, h);
       A.onFrame(c.toDataURL('image/jpeg', 0.7));
     }catch(e){}
-  }, 500);
+  }, 200);
 }
 
 function dirs(sdp){

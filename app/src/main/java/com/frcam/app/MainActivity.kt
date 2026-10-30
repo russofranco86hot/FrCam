@@ -51,6 +51,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        PhoneWearSyncEngine.onToggleMotion = { id, enabled, recordMode ->
+            viewModel.toggleMotionDetection(id, enabled, recordMode)
+        }
         wearMessageListener = PhoneWearSyncEngine.registerListener(this) {
             viewModel.cameras.value
         }
