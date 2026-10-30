@@ -326,9 +326,6 @@ object BluetoothCameraEngine {
                         onStatus("Enviando red '$ssid' a la cámara...")
                     }
 
-                    // Tamaño máximo de paquete seguro (<= 20 bytes en BLE 4.0/4.2 para evitar ATT Error 0x0D GATT_INVALID_ATTRIBUTE_LENGTH)
-                    val maxChunkSize = if (currentMtu > 23) (currentMtu - 3).coerceIn(20, 240) else 20
-
                     val cleanSsid = ssid.trim()
                     val payloads = listOf(
                         """{"code":204,"s":"$cleanSsid","p":"$pass"}""",
@@ -336,7 +333,7 @@ object BluetoothCameraEngine {
                         """{"cmd":"wifi","ssid":"$cleanSsid","password":"$pass"}"""
                     )
 
-                    // Transmisión secuencial en fragmentos seguros <= 20 bytes para alimentar el buffer UART de la cámara
+                    // Transmisión de tramas completas sin fragmentar para que el parser JSON del firmware de la cámara no falle
                     kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
                         var sentCount = 0
                         for (char in writeChars) {
@@ -348,39 +345,36 @@ object BluetoothCameraEngine {
                             }
 
                             for (json in payloads) {
-                                val rawBytes = json.toByteArray(Charsets.UTF_8)
-                                var offset = 0
-                                while (offset < rawBytes.size) {
-                                    val end = minOf(offset + maxChunkSize, rawBytes.size)
-                                    val chunk = rawBytes.copyOfRange(offset, end)
+                                for (format in listOf(json, "$json\n")) {
+                                    val rawBytes = format.toByteArray(Charsets.UTF_8)
                                     try {
                                         @Suppress("DEPRECATION")
-                                        char.value = chunk
+                                        char.value = rawBytes
                                         @Suppress("DEPRECATION")
                                         char.writeType = writeType
                                         val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                            gatt.writeCharacteristic(char, chunk, writeType) == 0
+                                            gatt.writeCharacteristic(char, rawBytes, writeType) == 0
                                         } else {
                                             @Suppress("DEPRECATION")
                                             gatt.writeCharacteristic(char)
                                         }
                                         if (sent) sentCount++
-                                        Log.d(TAG, "Chunk [${chunk.size}B] a ${char.uuid}: ${String(chunk)}")
+                                        Log.d(TAG, "Payload enviado a ${char.uuid} ($writeType): $format")
                                     } catch (e: Exception) {
-                                        Log.w(TAG, "Error transmitiendo chunk a ${char.uuid}: ${e.message}")
+                                        Log.w(TAG, "Error transmitiendo a ${char.uuid}: ${e.message}")
                                     }
-                                    offset = end
-                                    kotlinx.coroutines.delay(35L) // Pausa para permitir procesamiento en MCU
+                                    kotlinx.coroutines.delay(40L)
                                 }
-                                kotlinx.coroutines.delay(80L)
                             }
                         }
 
                         if (sentCount > 0) {
                             mainHandler.post {
-                                _provisioningStatus.value = "¡Credenciales recibidas por la cámara! Conectando a '$ssid'..."
-                                onStatus("¡Red '$ssid' enviada! Esperando que la luz azul quede fija...")
+                                _provisioningStatus.value = "¡Credenciales recibidas por la cámara! Conectando a '$cleanSsid'..."
+                                onStatus("¡Red '$cleanSsid' enviada! Esperando que la luz azul quede fija...")
                             }
+                            // Desconectar BLE tras 1.2 segundos para liberar la antena compartida de 2.4 GHz
+                            // y permitir que el microprocesador de la cámara pase de modo BLE a Wi-Fi STA (luz fija)
                             mainHandler.postDelayed({
                                 if (!isDone) {
                                     isDone = true
@@ -390,10 +384,10 @@ object BluetoothCameraEngine {
                                         gatt.close()
                                         activeGatt = null
                                     } catch (_: Exception) {}
-                                    _provisioningStatus.value = "¡Wi-Fi configurado con éxito!"
+                                    _provisioningStatus.value = "¡Wi-Fi configurado! Luz azul fija."
                                     onResult(Result.success("¡Credenciales enviadas a la cámara! Espera a que la luz azul quede fija y pulsa 'Buscar IP'."))
                                 }
-                            }, 8000L)
+                            }, 1200L)
                         } else {
                             finishWithError("No se pudo transmitir la configuración por Bluetooth", onResult, timeoutRunnable)
                         }
@@ -431,6 +425,9 @@ object BluetoothCameraEngine {
 
         for (service in services) {
             val sUuid = service.uuid.toString().lowercase()
+            // Ignorar servicios estándar Bluetooth SIG que no aceptan comandos Wi-Fi
+            if (sUuid.startsWith("000018")) continue
+
             for (char in service.characteristics) {
                 val prop = char.properties
                 val isWritable = (prop and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
@@ -438,8 +435,9 @@ object BluetoothCameraEngine {
                 if (isWritable) {
                     val cUuid = char.uuid.toString().lowercase()
                     if (sUuid.contains("fee7") || sUuid.contains("fff0") || sUuid.contains("ffe0") ||
-                        sUuid.contains("ae00") || sUuid.contains("ae01") ||
-                        cUuid.contains("fec7") || cUuid.contains("fec8") || cUuid.contains("fff1") || cUuid.contains("ffe1")
+                        sUuid.contains("ae00") || sUuid.contains("ae01") || sUuid.contains("fe01") || sUuid.contains("ba01") ||
+                        cUuid.contains("fec7") || cUuid.contains("fec8") || cUuid.contains("fec9") ||
+                        cUuid.contains("fff1") || cUuid.contains("fff2") || cUuid.contains("ffe1") || cUuid.contains("ae01")
                     ) {
                         preferred.add(char)
                     } else {
