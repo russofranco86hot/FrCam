@@ -67,7 +67,7 @@ object PhoneWearSyncEngine {
                             val firstLine = reader.readLine() ?: ""
                             Log.d(TAG, "Petición HTTP recibida desde ${client.inetAddress.hostAddress}: $firstLine")
 
-                            val cams = cachedCameras.ifEmpty { getCameras() }
+                            val cams = (cachedCameras.ifEmpty { getCameras() }).map { it.copy(liveInDashboard = true) }
                             val body = json.encodeToString(cams).toByteArray(Charsets.UTF_8)
 
                             val out = client.getOutputStream()
@@ -121,13 +121,14 @@ object PhoneWearSyncEngine {
      * Envía la lista completa de cámaras al reloj por todos los canales disponibles.
      */
     fun syncCamerasToWatch(context: Context, cameras: List<CameraConfig>, targetNodeId: String? = null) {
-        if (cameras.isNotEmpty()) {
-            cachedCameras = cameras
+        val activeCameras = cameras.map { it.copy(liveInDashboard = true) }
+        if (activeCameras.isNotEmpty()) {
+            cachedCameras = activeCameras
         }
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val camsToSend = if (cameras.isNotEmpty()) cameras else cachedCameras
+                val camsToSend = if (activeCameras.isNotEmpty()) activeCameras else cachedCameras
                 if (camsToSend.isEmpty()) {
                     Log.w(TAG, "No hay cámaras para sincronizar")
                     return@launch

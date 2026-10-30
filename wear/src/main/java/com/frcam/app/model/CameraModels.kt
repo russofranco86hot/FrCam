@@ -110,17 +110,18 @@ enum class CameraBrand(
         defaultRtspPort = 554,
         defaultHttpPort = 80,
         defaultOnvifPort = 6123,
-        defaultUsername = "admin",
-        defaultMainPath = "/live/ch0",
-        defaultSubPath = "/mjpeg/1",
+        defaultUsername = "",
+        defaultMainPath = "/video",
+        defaultSubPath = "/video",
         defaultPtzType = PtzControlType.NONE,
         fallbackPaths = listOf(
-            "/live/ch0",
-            "/stream",
             "/video",
-            "/mjpeg/1"
+            "/stream",
+            "/mjpeg/1",
+            "/live/ch0",
+            "/live.mjpg"
         ),
-        setupTip = "Las cámaras V720 se comunican por los puertos locales 80, 6123 y 554 (o en su red Wi-Fi AP 'NAX_...'). FrCam detecta automáticamente la cámara en tu red local."
+        setupTip = "Las cámaras V720 (Naxclow / A9 / Xiaovv) no usan usuario ni contraseña. Se vinculan instantáneamente por Bluetooth o por red local (HTTP puerto 80/8080/6123)."
     ),
     RING_CLOUD(
         displayName = "Ring (Timbre / Cámara)",
@@ -488,14 +489,17 @@ data class CameraConfig(
                 }
             }
             CameraBrand.V720_NAXCLOW -> {
-                val rtspCandidates = listOf(
-                    "rtsp://$creds$cleanHost:554/live/ch0",
-                    "rtsp://$creds$cleanHost:8554/live/ch0",
+                val v720Candidates = listOf(
                     "http://$cleanHost:$httpPort/video",
                     "http://$cleanHost:8080/video",
-                    "http://$cleanHost:81/stream"
+                    "http://$cleanHost:$httpPort/stream",
+                    "http://$cleanHost:8080/stream",
+                    "http://$cleanHost:$httpPort/mjpeg/1",
+                    "http://$cleanHost:81/stream",
+                    "rtsp://$cleanHost:554/live/ch0",
+                    "rtsp://$cleanHost:8554/live/ch0"
                 )
-                for (url in rtspCandidates) {
+                for (url in v720Candidates) {
                     if (url !in candidates) candidates.add(url)
                 }
             }

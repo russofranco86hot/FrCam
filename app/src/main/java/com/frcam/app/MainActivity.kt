@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -52,10 +53,6 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         wearMessageListener = PhoneWearSyncEngine.registerListener(this) {
             viewModel.cameras.value
-        }
-        val currentCams = viewModel.cameras.value
-        if (currentCams.isNotEmpty()) {
-            PhoneWearSyncEngine.syncCamerasToWatch(this, currentCams)
         }
     }
 
@@ -151,13 +148,6 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(activeDetailCamera?.id) {
                     if (activeDetailCamera != null) {
                         viewModel.recordCameraStreamAccess(activeDetailCamera)
-                    }
-                }
-
-                // Sincronizar automáticamente con el reloj Wear OS ante cambios en la lista de cámaras
-                LaunchedEffect(cameras) {
-                    if (cameras.isNotEmpty()) {
-                        PhoneWearSyncEngine.syncCamerasToWatch(this@MainActivity, cameras)
                     }
                 }
 
@@ -267,6 +257,10 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenGallery = {
                             showGalleryDialog = true
+                        },
+                        onSyncToWatch = {
+                            PhoneWearSyncEngine.syncCamerasToWatch(this@MainActivity, cameras)
+                            Toast.makeText(this@MainActivity, "Sincronizando ${cameras.size} cámaras con tu reloj...", Toast.LENGTH_SHORT).show()
                         },
                         onAddCamera = { preselectedBrand: CameraBrand? ->
                             viewModel.clearDiagnostic()

@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.util.Base64
 import android.view.Surface
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -42,23 +43,27 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
+import com.frcam.app.model.StreamProtocol
 import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
  * Reproductor de video ultraliviano para Wear OS.
- * Soporta cámaras V380 Pro nativo, Ring Cloud snapshots y RTSP/ONVIF estándar con ExoPlayer.
- * Diseñado para mínimo consumo de batería y máxima fluidez en pantallas redondas y cuadradas de reloj.
+ * Soporta cámaras V380 Pro nativo (con audio G.711A), Ring Cloud snapshots,
+ * cámaras V720/MJPEG y flujos RTSP/ONVIF estándar con ExoPlayer y control de sonido.
  */
 @OptIn(UnstableApi::class)
 @Composable
 fun WearCameraStreamView(
     camera: CameraConfig,
+    isMuted: Boolean = true,
     modifier: Modifier = Modifier,
     onTap: (() -> Unit)? = null
 ) {
@@ -69,6 +74,13 @@ fun WearCameraStreamView(
 
     val isV380 = camera.isV380NativeProtocol()
     val isRing = camera.brand == CameraBrand.RING_CLOUD
+    val isMjpeg = !isV380 && !isRing && (
+        camera.protocol == StreamProtocol.HTTP_MJPEG ||
+        camera.brand == CameraBrand.V720_NAXCLOW ||
+        camera.mainStreamPath.contains("mjpeg", ignoreCase = true) ||
+        camera.mainStreamPath.contains("video", ignoreCase = true) ||
+        camera.mainStreamPath.contains("stream", ignoreCase = true)
+    )
 
     Box(
         modifier = modifier
@@ -136,9 +148,20 @@ fun WearCameraStreamView(
                 }
             }
 
-            // 2. Cámaras V380 Pro Nativo (decodificación por hardware MediaCodec + TextureView)
+            // 2. Cámaras V380 Pro Nativo (decodificación por hardware MediaCodec + TextureView + AudioTrack G.711A)
             isV380 -> {
                 var activeSurface by remember { mutableStateOf<Surface?>(null) }
+                val audioPlayer = remember { WearCameraAudioPlayer(8000) }
+
+                DisposableEffect(audioPlayer) {
+                    onDispose {
+                        audioPlayer.release()
+                    }
+                }
+
+                LaunchedEffect(isMuted) {
+                    audioPlayer.setMuted(isMuted)
+                }
 
                 AndroidView(
                     factory = { ctx ->
@@ -201,7 +224,7 @@ fun WearCameraStreamView(
                             username = camera.username,
                             password = camera.password,
                             preferCloud = camera.deviceId.isNotBlank() && (camera.host.isBlank() || camera.host == "0.0.0.0"),
-                            hdQuality = false, // Modo sub-stream para fluidez óptima en el reloj
+                            hdQuality = false,
                             scope = this,
                             onStatus = {},
                             onResolution = { _, _, _ -> },
@@ -227,7 +250,9 @@ fun WearCameraStreamView(
                                     }
                                 } catch (_: Exception) {}
                             },
-                            onAudioPacket = null,
+                            onAudioPacket = { audioBytes, packetType ->
+                                audioPlayer.playAudioFrame(audioBytes, isAlaw = (packetType == 0x16.toByte() || packetType == 0x1A.toByte()))
+                            },
                             onError = { err ->
                                 errorMessage = err
                                 isConnecting = false
@@ -242,9 +267,89 @@ fun WearCameraStreamView(
                 }
             }
 
-            // 3. Cámaras estándar RTSP / ONVIF / Hikvision / Dahua / Eye4 via ExoPlayer
+            // 3. Cámaras V720 / Naxclow y flujos HTTP MJPEG (decodificación directa por frames JPEG)
+            isMjpeg -> {
+                LaunchedEffect(camera.id, camera.host) {
+                    isConnecting = true
+                    errorMessage = null
+                    val candidateUrls = camera.buildCandidateUrls(useSubStream = true)
+
+                    withContext(Dispatchers.IO) {
+                        for (url in candidateUrls) {
+                            if (!isActive) break
+                            try {
+                                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                                    connectTimeout = 3500
+                                    readTimeout = 5000
+                                    requestMethod = "GET"
+                                    if (camera.username.isNotBlank()) {
+                                        val auth = Base64.encodeToString("${camera.username}:${camera.password}".toByteArray(), Base64.NO_WRAP)
+                                        setRequestProperty("Authorization", "Basic $auth")
+                                    }
+                                }
+                                conn.connect()
+                                if (conn.responseCode in 200..299) {
+                                    val input = BufferedInputStream(conn.inputStream, 16384)
+                                    val buffer = ByteArrayOutputStream(65536)
+                                    var prevByte = -1
+                                    var capturing = false
+
+                                    while (isActive) {
+                                        val b = input.read()
+                                        if (b == -1) break
+
+                                        if (!capturing) {
+                                            if (prevByte == 0xFF && b == 0xD8) {
+                                                capturing = true
+                                                buffer.reset()
+                                                buffer.write(0xFF)
+                                                buffer.write(0xD8)
+                                            }
+                                        } else {
+                                            buffer.write(b)
+                                            if (prevByte == 0xFF && b == 0xD9) {
+                                                val jpegBytes = buffer.toByteArray()
+                                                val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+                                                if (bmp != null) {
+                                                    currentBitmap = bmp
+                                                    isConnecting = false
+                                                    errorMessage = null
+                                                }
+                                                capturing = false
+                                            } else if (buffer.size() > 1_500_000) {
+                                                capturing = false
+                                                buffer.reset()
+                                            }
+                                        }
+                                        prevByte = b
+                                    }
+                                    conn.disconnect()
+                                    return@withContext
+                                }
+                                conn.disconnect()
+                            } catch (_: Exception) {}
+                        }
+                        if (currentBitmap == null) {
+                            errorMessage = "Sin señal de video V720"
+                            isConnecting = false
+                        }
+                    }
+                }
+
+                currentBitmap?.let { bmp ->
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = camera.name,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+            }
+
+            // 4. Cámaras estándar RTSP / ONVIF / Hikvision / Dahua / Eye4 via ExoPlayer
             else -> {
                 var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
+                var playerRef by remember { mutableStateOf<ExoPlayer?>(null) }
 
                 AndroidView(
                     factory = { ctx ->
@@ -254,6 +359,10 @@ fun WearCameraStreamView(
                     },
                     modifier = Modifier.fillMaxSize()
                 )
+
+                LaunchedEffect(playerRef, isMuted) {
+                    playerRef?.volume = if (isMuted) 0f else 1f
+                }
 
                 DisposableEffect(camera.id) {
                     val loadControl = DefaultLoadControl.Builder()
@@ -265,19 +374,26 @@ fun WearCameraStreamView(
                         .setLoadControl(loadControl)
                         .build()
 
+                    playerRef = player
                     textureViewRef?.let { tv ->
                         player.setVideoTextureView(tv)
                     }
 
-                    player.volume = 0f
+                    player.volume = if (isMuted) 0f else 1f
                     player.playWhenReady = true
 
                     val url = camera.buildStreamUrl(useSubStream = true)
-                    val mediaSource = RtspMediaSource.Factory()
-                        .setForceUseRtpTcp(true)
-                        .createMediaSource(MediaItem.fromUri(url))
+                    val mediaItem = MediaItem.fromUri(url)
 
-                    player.setMediaSource(mediaSource)
+                    if (url.startsWith("rtsp://", ignoreCase = true)) {
+                        val mediaSource = RtspMediaSource.Factory()
+                            .setForceUseRtpTcp(true)
+                            .createMediaSource(mediaItem)
+                        player.setMediaSource(mediaSource)
+                    } else {
+                        player.setMediaItem(mediaItem)
+                    }
+
                     player.prepare()
 
                     val listener = object : Player.Listener {
@@ -298,6 +414,7 @@ fun WearCameraStreamView(
                     onDispose {
                         player.removeListener(listener)
                         player.release()
+                        playerRef = null
                     }
                 }
             }

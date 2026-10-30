@@ -34,8 +34,9 @@ object WearCameraStorage {
         if (!raw.isNullOrBlank()) {
             try {
                 val list = json.decodeFromString<List<CameraConfig>>(raw)
-                _cameras.value = list
-                Log.d(TAG, "Cámaras cargadas desde caché Wear OS: ${list.size}")
+                val activeList = list.map { it.copy(liveInDashboard = true) }
+                _cameras.value = activeList
+                Log.d(TAG, "Cámaras cargadas desde caché Wear OS: ${activeList.size}")
             } catch (e: Exception) {
                 Log.e(TAG, "Error decodificando cámaras en reloj", e)
             }
@@ -43,14 +44,15 @@ object WearCameraStorage {
     }
 
     fun saveCameras(context: Context, cameraList: List<CameraConfig>) {
-        _cameras.value = cameraList
+        val activeList = cameraList.map { it.copy(liveInDashboard = true) }
+        _cameras.value = activeList
         try {
-            val raw = json.encodeToString(cameraList)
+            val raw = json.encodeToString(activeList)
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_CAMERAS_JSON, raw)
                 .apply()
-            Log.d(TAG, "Cámaras guardadas con éxito en reloj: ${cameraList.size}")
+            Log.d(TAG, "Cámaras guardadas con éxito en reloj: ${activeList.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Error guardando cámaras en reloj", e)
         }

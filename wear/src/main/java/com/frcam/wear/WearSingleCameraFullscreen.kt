@@ -1,9 +1,15 @@
 package com.frcam.wear
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -21,24 +27,29 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,10 +58,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.frcam.app.model.CameraConfig
 import kotlinx.coroutines.delay
 
@@ -60,9 +73,10 @@ import kotlinx.coroutines.delay
  * - Zoom interactivo por gestos (Pinch-to-zoom de 1x a 4.5x)
  * - Doble toque para alternar zoom (1x <-> 2.5x)
  * - Arrastre / Pan táctil cuando la imagen está ampliada
- * - Controles táctiles sutiles de zoom (+ / - / Reset)
- * - Deslizamiento horizontal entre cámaras (Swipe anterior / siguiente)
- * - Botón de regreso a la vista "Juntas"
+ * - Controles táctiles de zoom (+ / - / Reset)
+ * - Activación / Silenciado de sonido en vivo (Audio listening)
+ * - Activación de micrófono del reloj para hablar por el parlante de la cámara (Intercomunicador)
+ * - Navegación entre cámaras y botón de regreso a la vista cuadrícula
  */
 @Composable
 fun WearSingleCameraFullscreen(
@@ -73,19 +87,46 @@ fun WearSingleCameraFullscreen(
 ) {
     if (cameras.isEmpty()) return
 
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var currentIndex by remember { mutableIntStateOf(initialIndex.coerceIn(0, cameras.size - 1)) }
     val currentCamera = cameras[currentIndex]
 
     var scale by remember(currentIndex) { mutableFloatStateOf(1f) }
     var offset by remember(currentIndex) { mutableStateOf(Offset.Zero) }
 
+    var isMuted by remember(currentIndex) { mutableStateOf(true) }
+
+    // Motor de audio bidireccional (Micrófono)
+    val broadcaster = remember { WearIntercomBroadcaster(context) }
+    val isBroadcasting by broadcaster.isBroadcasting.collectAsState()
+
+    DisposableEffect(currentCamera.id) {
+        onDispose {
+            broadcaster.stopBroadcasting()
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            broadcaster.startBroadcasting(currentCamera, scope) { err ->
+                Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(context, "Se requiere permiso de Micrófono para hablar.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     var showOverlayControls by remember { mutableStateOf(true) }
     var cameraPillVisible by remember(currentIndex) { mutableStateOf(true) }
 
-    // Ocultar controles automáticamente después de 3.5 segundos para no tapar el video
-    LaunchedEffect(showOverlayControls, currentIndex) {
-        if (showOverlayControls) {
-            delay(3500L)
+    // Si el micrófono está transmitiendo, mantener los controles visibles
+    LaunchedEffect(showOverlayControls, currentIndex, isBroadcasting) {
+        if (showOverlayControls && !isBroadcasting) {
+            delay(4000L)
             showOverlayControls = false
         }
     }
@@ -146,13 +187,14 @@ fun WearSingleCameraFullscreen(
         ) {
             WearCameraStreamView(
                 camera = currentCamera,
+                isMuted = isMuted,
                 modifier = Modifier.fillMaxSize()
             )
         }
 
         // Chip flotante con nombre de cámara e índice (se oculta automáticamente)
         AnimatedVisibility(
-            visible = cameraPillVisible || showOverlayControls,
+            visible = (cameraPillVisible || showOverlayControls) && !isBroadcasting,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -180,9 +222,35 @@ fun WearSingleCameraFullscreen(
             }
         }
 
-        // Controles superpuestos (Zoom, navegación y volver a cuadrícula)
+        // Banner indicador de micrófono transmitiendo en vivo
+        if (isBroadcasting) {
+            Surface(
+                color = Color(0xFFDC2626).copy(alpha = 0.90f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 10.dp)
+                    .clickable { broadcaster.stopBroadcasting() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(Icons.Default.Mic, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Text(
+                        text = "Hablando por cámara • Toca para parar",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                }
+            }
+        }
+
+        // Controles superpuestos (Volver, Audio, Micrófono, Navegación y Zoom)
         AnimatedVisibility(
-            visible = showOverlayControls,
+            visible = showOverlayControls || isBroadcasting,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.fillMaxSize()
@@ -190,12 +258,15 @@ fun WearSingleCameraFullscreen(
             Box(modifier = Modifier.fillMaxSize()) {
                 // Botón volver arriba a la izquierda
                 IconButton(
-                    onClick = onBackToGrid,
+                    onClick = {
+                        broadcaster.stopBroadcasting()
+                        onBackToGrid()
+                    },
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(top = 12.dp, start = 12.dp)
                         .size(32.dp)
-                        .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                        .background(Color.Black.copy(alpha = 0.70f), CircleShape)
                 ) {
                     Icon(
                         imageVector = Icons.Default.GridView,
@@ -205,10 +276,30 @@ fun WearSingleCameraFullscreen(
                     )
                 }
 
+                // Botón de Sonido (Mute / Unmute) arriba a la derecha
+                IconButton(
+                    onClick = {
+                        isMuted = !isMuted
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 12.dp, end = 12.dp)
+                        .size(32.dp)
+                        .background(Color.Black.copy(alpha = 0.70f), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (isMuted) "Activar sonido" else "Silenciar",
+                        tint = if (isMuted) Color(0xFF94A3B8) else Color(0xFF38BDF8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
                 // Flechas de cambio de cámara (anterior y siguiente)
                 if (cameras.size > 1) {
                     IconButton(
                         onClick = {
+                            broadcaster.stopBroadcasting()
                             currentIndex = if (currentIndex > 0) currentIndex - 1 else cameras.size - 1
                         },
                         modifier = Modifier
@@ -227,6 +318,7 @@ fun WearSingleCameraFullscreen(
 
                     IconButton(
                         onClick = {
+                            broadcaster.stopBroadcasting()
                             currentIndex = (currentIndex + 1) % cameras.size
                         },
                         modifier = Modifier
@@ -244,17 +336,17 @@ fun WearSingleCameraFullscreen(
                     }
                 }
 
-                // Botones táctiles de Zoom al pie de pantalla
+                // Barra inferior combinada: Zoom + Botón de Micrófono
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 8.dp)
-                        .background(Color.Black.copy(alpha = 0.75f), RoundedCornerShape(16.dp))
+                        .background(Color.Black.copy(alpha = 0.80f), RoundedCornerShape(18.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Botón Alejar
+                    // Botón Alejar Zoom
                     IconButton(
                         onClick = {
                             val newScale = (scale - 0.5f).coerceAtLeast(1f)
@@ -285,7 +377,7 @@ fun WearSingleCameraFullscreen(
                             .padding(horizontal = 4.dp)
                     )
 
-                    // Botón Acercar
+                    // Botón Acercar Zoom
                     IconButton(
                         onClick = {
                             scale = (scale + 0.5f).coerceAtMost(4.5f)
@@ -296,6 +388,44 @@ fun WearSingleCameraFullscreen(
                             imageVector = Icons.Default.Add,
                             contentDescription = "Acercar zoom",
                             tint = if (scale < 4.5f) Color(0xFF38BDF8) else Color(0xFF64748B),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .height(18.dp)
+                            .width(1.dp)
+                            .background(Color(0xFF334155))
+                    )
+
+                    // Botón de Micrófono / Intercomunicador
+                    IconButton(
+                        onClick = {
+                            if (isBroadcasting) {
+                                broadcaster.stopBroadcasting()
+                            } else {
+                                val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                                if (hasPerm) {
+                                    broadcaster.startBroadcasting(currentCamera, scope) { err ->
+                                        Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                    }
+                                } else {
+                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(
+                                if (isBroadcasting) Color(0xFFDC2626) else Color.Transparent,
+                                CircleShape
+                            )
+                    ) {
+                        Icon(
+                            imageVector = if (isBroadcasting) Icons.Default.Mic else Icons.Default.MicOff,
+                            contentDescription = if (isBroadcasting) "Detener micrófono" else "Hablar por cámara",
+                            tint = if (isBroadcasting) Color.White else Color(0xFFF59E0B),
                             modifier = Modifier.size(16.dp)
                         )
                     }

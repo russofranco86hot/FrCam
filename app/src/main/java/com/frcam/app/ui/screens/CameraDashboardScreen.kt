@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Watch
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -117,6 +118,7 @@ fun CameraDashboardScreen(
     onToggleMotion: (CameraConfig, Boolean) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenGallery: () -> Unit,
+    onSyncToWatch: (() -> Unit)? = null,
     onExportCameras: (Context, Uri, (String) -> Unit) -> Unit,
     onImportCameras: (Context, Uri, (Result<Int>) -> Unit) -> Unit
 ) {
@@ -340,6 +342,22 @@ fun CameraDashboardScreen(
                                     onOpenSettings()
                                 }
                             )
+                            if (onSyncToWatch != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Sincronizar con Reloj Wear OS") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Watch,
+                                            contentDescription = null,
+                                            tint = Color(0xFF38BDF8)
+                                        )
+                                    },
+                                    onClick = {
+                                        showMenu = false
+                                        onSyncToWatch.invoke()
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("Escanear Red Wi-Fi") },
                                 leadingIcon = {
