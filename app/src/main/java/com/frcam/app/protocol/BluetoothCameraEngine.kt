@@ -35,6 +35,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.util.UUID
 
 data class DiscoveredBleCamera(
@@ -244,6 +246,7 @@ object BluetoothCameraEngine {
         onStatus("Conectando con ${bleCamera.name} por Bluetooth...")
 
         var isDone = false
+        var currentMtu = 23
         val timeoutRunnable = Runnable {
             if (isDone) return@Runnable
             isDone = true
@@ -264,7 +267,7 @@ object BluetoothCameraEngine {
                 override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
                         mainHandler.post {
-                            _provisioningStatus.value = "¡Bluetooth conectado! Negociando servicios..."
+                            _provisioningStatus.value = "¡Bluetooth conectado! Negociando canal de datos..."
                             onStatus("Conectado con ${bleCamera.name}. Negociando canal de datos...")
                         }
                         try {
@@ -293,7 +296,10 @@ object BluetoothCameraEngine {
                 }
 
                 override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
-                    Log.d(TAG, "MTU BLE configurado a $mtu")
+                    Log.d(TAG, "MTU BLE configurado a $mtu (status=$status)")
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        currentMtu = mtu
+                    }
                     gatt?.discoverServices()
                 }
 
@@ -303,18 +309,11 @@ object BluetoothCameraEngine {
                         return
                     }
 
-                    mainHandler.post {
-                        _provisioningStatus.value = "Enviando credenciales Wi-Fi por Bluetooth..."
-                        onStatus("Enviando red '$ssid' a la cámara...")
-                    }
-
                     val writeChars = findWritableCharacteristics(gatt.services)
                     if (writeChars.isEmpty()) {
                         finishWithError("No se encontró canal de escritura en la cámara", onResult, timeoutRunnable)
                         return
                     }
-
-                    val char = writeChars.first()
 
                     findNotifyCharacteristic(gatt.services)?.let { notifyChar ->
                         try {
@@ -322,48 +321,87 @@ object BluetoothCameraEngine {
                         } catch (_: Exception) {}
                     }
 
-                    val json = """{"s":"${ssid.trim()}","p":"$pass"}"""
-                    val payloadBytes = json.toByteArray(Charsets.UTF_8)
-                    try {
-                        @Suppress("DEPRECATION")
-                        char.value = payloadBytes
-                        @Suppress("DEPRECATION")
-                        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                        val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            gatt.writeCharacteristic(char, payloadBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == 0
-                        } else {
-                            @Suppress("DEPRECATION")
-                            gatt.writeCharacteristic(char)
+                    mainHandler.post {
+                        _provisioningStatus.value = "Enviando credenciales Wi-Fi por Bluetooth..."
+                        onStatus("Enviando red '$ssid' a la cámara...")
+                    }
+
+                    // Tamaño máximo de paquete seguro (<= 20 bytes en BLE 4.0/4.2 para evitar ATT Error 0x0D GATT_INVALID_ATTRIBUTE_LENGTH)
+                    val maxChunkSize = if (currentMtu > 23) (currentMtu - 3).coerceIn(20, 240) else 20
+
+                    val cleanSsid = ssid.trim()
+                    val payloads = listOf(
+                        """{"code":204,"s":"$cleanSsid","p":"$pass"}""",
+                        """{"s":"$cleanSsid","p":"$pass"}""",
+                        """{"cmd":"wifi","ssid":"$cleanSsid","password":"$pass"}"""
+                    )
+
+                    // Transmisión secuencial en fragmentos seguros <= 20 bytes para alimentar el buffer UART de la cámara
+                    kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                        var sentCount = 0
+                        for (char in writeChars) {
+                            val hasNoResp = (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                            val writeType = if (hasNoResp) {
+                                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                            } else {
+                                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                            }
+
+                            for (json in payloads) {
+                                val rawBytes = json.toByteArray(Charsets.UTF_8)
+                                var offset = 0
+                                while (offset < rawBytes.size) {
+                                    val end = minOf(offset + maxChunkSize, rawBytes.size)
+                                    val chunk = rawBytes.copyOfRange(offset, end)
+                                    try {
+                                        @Suppress("DEPRECATION")
+                                        char.value = chunk
+                                        @Suppress("DEPRECATION")
+                                        char.writeType = writeType
+                                        val sent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                            gatt.writeCharacteristic(char, chunk, writeType) == 0
+                                        } else {
+                                            @Suppress("DEPRECATION")
+                                            gatt.writeCharacteristic(char)
+                                        }
+                                        if (sent) sentCount++
+                                        Log.d(TAG, "Chunk [${chunk.size}B] a ${char.uuid}: ${String(chunk)}")
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Error transmitiendo chunk a ${char.uuid}: ${e.message}")
+                                    }
+                                    offset = end
+                                    kotlinx.coroutines.delay(35L) // Pausa para permitir procesamiento en MCU
+                                }
+                                kotlinx.coroutines.delay(80L)
+                            }
                         }
-                        Log.d(TAG, "Payload enviado a ${char.uuid}: $json (exitoso=$sent)")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error transmitiendo a ${char.uuid}: ${e.message}")
+
+                        if (sentCount > 0) {
+                            mainHandler.post {
+                                _provisioningStatus.value = "¡Credenciales recibidas por la cámara! Conectando a '$ssid'..."
+                                onStatus("¡Red '$ssid' enviada! Esperando que la luz azul quede fija...")
+                            }
+                            mainHandler.postDelayed({
+                                if (!isDone) {
+                                    isDone = true
+                                    mainHandler.removeCallbacks(timeoutRunnable)
+                                    try {
+                                        gatt.disconnect()
+                                        gatt.close()
+                                        activeGatt = null
+                                    } catch (_: Exception) {}
+                                    _provisioningStatus.value = "¡Wi-Fi configurado con éxito!"
+                                    onResult(Result.success("¡Credenciales enviadas a la cámara! Espera a que la luz azul quede fija y pulsa 'Buscar IP'."))
+                                }
+                            }, 8000L)
+                        } else {
+                            finishWithError("No se pudo transmitir la configuración por Bluetooth", onResult, timeoutRunnable)
+                        }
                     }
                 }
 
                 override fun onCharacteristicWrite(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
                     Log.d(TAG, "onCharacteristicWrite status=$status")
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        mainHandler.post {
-                            _provisioningStatus.value = "¡Credenciales recibidas por la cámara! Conectando a '$ssid'..."
-                            onStatus("¡Red '$ssid' aceptada! Esperando que la luz azul quede fija...")
-                        }
-                        mainHandler.postDelayed({
-                            if (!isDone) {
-                                isDone = true
-                                mainHandler.removeCallbacks(timeoutRunnable)
-                                try {
-                                    gatt?.disconnect()
-                                    gatt?.close()
-                                    activeGatt = null
-                                } catch (_: Exception) {}
-                                _provisioningStatus.value = "¡Wi-Fi configurado con éxito!"
-                                onResult(Result.success("¡Credenciales enviadas a la cámara! Espera a que la luz azul quede fija y pulsa 'Buscar IP'."))
-                            }
-                        }, 7000L)
-                    } else {
-                        finishWithError("La cámara rechazó la configuración Wi-Fi (status=$status)", onResult, timeoutRunnable)
-                    }
                 }
 
                 override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {

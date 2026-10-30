@@ -999,14 +999,18 @@ fun LanDiscoveryDialog(
     // Auto-detectar SSID de la red Wi-Fi actual del móvil y restaurar credenciales
     LaunchedEffect(Unit) {
         val (sSsid, sPass) = CameraProvisioningEngine.getSavedWifiCredentials(context)
-        val (curSsid, _) = CameraProvisioningEngine.getCurrentWifiConnection(context)
-        if (!curSsid.isNullOrBlank() && curSsid != "<unknown ssid>") {
-            homeWifiSsid = curSsid
-        } else if (homeWifiSsid.isBlank() && sSsid.isNotBlank()) {
+        if (sSsid.isNotBlank() && homeWifiSsid.isBlank()) {
             homeWifiSsid = sSsid
         }
-        if (homeWifiPassword.isBlank() && sPass.isNotBlank()) {
+        if (sPass.isNotBlank() && homeWifiPassword.isBlank()) {
             homeWifiPassword = sPass
+        }
+        val (curSsid, _) = CameraProvisioningEngine.getCurrentWifiConnection(context)
+        if (!curSsid.isNullOrBlank() && curSsid != "<unknown ssid>" && curSsid != "0x") {
+            homeWifiSsid = curSsid
+            if (curSsid == sSsid && sPass.isNotBlank()) {
+                homeWifiPassword = sPass
+            }
         }
     }
 
@@ -1057,7 +1061,9 @@ fun LanDiscoveryDialog(
         },
         text = {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // Selector de Pestañas
@@ -1176,13 +1182,11 @@ fun LanDiscoveryDialog(
                             }
                         }
                     } else {
-                        LazyColumn(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(220.dp),
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(discoveredDevices, key = { it.ipAddress }) { dev ->
+                            discoveredDevices.forEach { dev ->
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1419,13 +1423,11 @@ fun LanDiscoveryDialog(
                                     fontWeight = FontWeight.SemiBold,
                                     color = Color(0xFF34D399)
                                 )
-                                LazyColumn(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(max = 200.dp),
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    items(bleDevices, key = { it.address }) { dev ->
+                                    bleDevices.forEach { dev ->
                                         Card(
                                             modifier = Modifier.fillMaxWidth(),
                                             colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
@@ -1777,8 +1779,8 @@ fun LanDiscoveryDialog(
                         val otherAps = waitingCameraAps.filter { !it.isCurrentlyConnected }
                         if (otherAps.isNotEmpty()) {
                             Text("Puntos de acceso de cámaras encontrados:", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF38BDF8))
-                            LazyColumn(modifier = Modifier.fillMaxWidth().height(140.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                items(otherAps, key = { it.ssid }) { ap ->
+                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                otherAps.forEach { ap ->
                                     Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh), shape = RoundedCornerShape(8.dp)) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth().padding(8.dp),
