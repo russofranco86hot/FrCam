@@ -50,10 +50,14 @@ object PhoneWearSyncEngine {
     @Volatile
     var onToggleMotion: ((String, Boolean, String) -> Unit)? = null
 
+    @Volatile
+    private var appContext: Context? = null
+
     /**
      * Inicia los servidores locales (HTTP + UDP) en el celular para sincronización directa por Wi-Fi.
      */
     fun startLanSyncServer(context: Context, getCameras: () -> List<CameraConfig>) {
+        appContext = context.applicationContext
         if (isLanServerRunning.getAndSet(true)) return
 
         // 1. Servidor HTTP local (puerto 49880) para entrega confiable de JSON completo
@@ -103,13 +107,28 @@ object PhoneWearSyncEngine {
                                     out.write(header.toByteArray(Charsets.UTF_8))
                                     out.flush()
 
-                                    // Despertar cámara en segundo plano
-                                    com.frcam.app.protocol.RingCloudClient.wakeLiveStream(id)
+                                    // Adquirir stream WebRTC headless en segundo plano
+                                    val targetCtx = appContext ?: context
+                                    com.frcam.app.protocol.RingHeadlessLiveViewManager.acquire(targetCtx, id)
 
+                                    var lastSnapshotFetch = 0L
                                     try {
                                         while (!client.isClosed && client.isConnected) {
                                             val liveBmp = com.frcam.app.protocol.RingCloudClient.getLiveFrame(id)
-                                            val bmp = liveBmp ?: com.frcam.app.protocol.RingCloudClient.getCachedSnapshot(id)?.bitmap
+                                            val now = System.currentTimeMillis()
+                                            val bmp = if (liveBmp != null) {
+                                                liveBmp
+                                            } else {
+                                                // Si el stream WebRTC aún está negociando, refrescar snapshot real cada 1.5s
+                                                if (now - lastSnapshotFetch > 1500L) {
+                                                    lastSnapshotFetch = now
+                                                    com.frcam.app.protocol.RingCloudClient.triggerSnapshotUpdate(id)
+                                                    com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)?.bitmap
+                                                } else {
+                                                    com.frcam.app.protocol.RingCloudClient.getCachedSnapshot(id)?.bitmap
+                                                }
+                                            }
+
                                             if (bmp != null) {
                                                 val bos = java.io.ByteArrayOutputStream()
                                                 bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 65, bos)
@@ -121,16 +140,73 @@ object PhoneWearSyncEngine {
                                                 out.write(imgBytes)
                                                 out.write("\r\n".toByteArray(Charsets.UTF_8))
                                                 out.flush()
-                                            } else {
-                                                com.frcam.app.protocol.RingCloudClient.fetchDeviceSnapshotWithMeta(id)
                                             }
-                                            // Refresco a 4 FPS para movimiento en vivo real
-                                            delay(250L)
+                                            // Refresco a 5 FPS para movimiento en vivo real
+                                            delay(200L)
                                         }
                                     } catch (_: Exception) {}
-                                    try { client.close() } catch (_: Exception) {}
+                                    finally {
+                                        com.frcam.app.protocol.RingHeadlessLiveViewManager.release(id)
+                                        try { client.close() } catch (_: Exception) {}
+                                    }
                                     return@launch
                                 }
+                            }
+
+                            if (firstLine.contains("/ring_audio")) {
+                                val idStr = Regex("""[?&]id=(\d+)""").find(firstLine)?.groupValues?.get(1)
+                                val id = idStr?.toLongOrNull() ?: 0L
+                                val out = client.getOutputStream()
+                                val header = "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: audio/l16; rate=8000; channels=1\r\n" +
+                                        "Cache-Control: no-cache, no-store, must-revalidate\r\n" +
+                                        "Connection: close\r\n\r\n"
+                                out.write(header.toByteArray(Charsets.UTF_8))
+                                out.flush()
+                                try {
+                                    while (!client.isClosed && client.isConnected) {
+                                        val chunk = com.frcam.app.protocol.RingCloudClient.pollAudioChunk(id)
+                                        if (chunk != null && chunk.isNotEmpty()) {
+                                            out.write(chunk)
+                                            out.flush()
+                                        } else {
+                                            delay(30L)
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                                try { client.close() } catch (_: Exception) {}
+                                return@launch
+                            }
+
+                            if (firstLine.startsWith("POST /ring_mic") || firstLine.contains("/ring_mic")) {
+                                var contentLength = 0
+                                var headerLine = reader.readLine()
+                                while (!headerLine.isNullOrBlank()) {
+                                    if (headerLine.startsWith("Content-Length:", ignoreCase = true)) {
+                                        contentLength = headerLine.substringAfter(":").trim().toIntOrNull() ?: 0
+                                    }
+                                    headerLine = reader.readLine()
+                                }
+                                if (contentLength > 0) {
+                                    val inStream = client.getInputStream()
+                                    val pcmBytes = ByteArray(contentLength)
+                                    var totalRead = 0
+                                    while (totalRead < contentLength) {
+                                        val r = inStream.read(pcmBytes, totalRead, contentLength - totalRead)
+                                        if (r == -1) break
+                                        totalRead += r
+                                    }
+                                    val b64 = android.util.Base64.encodeToString(pcmBytes, android.util.Base64.NO_WRAP)
+                                    com.frcam.app.protocol.RingWebRtcController.deliverMicChunk(b64)
+                                }
+                                val resp = """{"status":"ok"}"""
+                                val out = client.getOutputStream()
+                                val header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${resp.length}\r\nConnection: close\r\n\r\n"
+                                out.write(header.toByteArray(Charsets.UTF_8))
+                                out.write(resp.toByteArray(Charsets.UTF_8))
+                                out.flush()
+                                try { client.close() } catch (_: Exception) {}
+                                return@launch
                             }
 
                             if (firstLine.contains("/ring_ticket")) {
@@ -396,6 +472,11 @@ object PhoneWearSyncEngine {
                         val enabled = parts[1].toBoolean()
                         onToggleMotion?.invoke(id, enabled, if (enabled) "GIF" else "OFF")
                     }
+                } catch (_: Exception) {}
+            } else if (messageEvent.path == "/frcam/ring_mic") {
+                try {
+                    val b64 = android.util.Base64.encodeToString(messageEvent.data, android.util.Base64.NO_WRAP)
+                    com.frcam.app.protocol.RingWebRtcController.deliverMicChunk(b64)
                 } catch (_: Exception) {}
             }
         }

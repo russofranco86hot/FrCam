@@ -12,6 +12,7 @@ import androidx.core.content.ContextCompat
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.protocol.V380NativeProtocol
+import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.io.OutputStream
 import java.net.HttpURLConnection
@@ -349,7 +351,8 @@ class WearIntercomBroadcaster(private val context: Context) {
         val supportsTalk = camera.isV380NativeProtocol() ||
             camera.brand == CameraBrand.EYE4_VSTARCAM ||
             camera.brand == CameraBrand.HIKVISION ||
-            camera.brand == CameraBrand.DAHUA
+            camera.brand == CameraBrand.DAHUA ||
+            camera.brand == CameraBrand.RING_CLOUD
 
         if (!supportsTalk) {
             onError("La cámara ${camera.brand.displayName} no admite retorno de audio en el reloj.")
@@ -383,6 +386,21 @@ class WearIntercomBroadcaster(private val context: Context) {
                 var seq = 0
                 var talk: Pair<WearHttpTalkSession, Boolean>? = null
 
+                val doorbotId = if (camera.brand == CameraBrand.RING_CLOUD) {
+                    camera.deviceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
+                } else 0L
+
+                val phoneHost = (WearCameraStorage.lastKnownPhoneIp ?: camera.remoteHost.ifBlank { camera.host })
+                    .trim().removePrefix("http://").substringBefore(":")
+
+                val connectedNodes = if (camera.brand == CameraBrand.RING_CLOUD) {
+                    try {
+                        Wearable.getNodeClient(context).connectedNodes.await()
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                } else emptyList()
+
                 if (camera.brand == CameraBrand.HIKVISION || camera.brand == CameraBrand.DAHUA) {
                     talk = WearHttpTalkSession.open(camera)
                     if (talk == null) {
@@ -405,6 +423,34 @@ class WearIntercomBroadcaster(private val context: Context) {
                                 }
                                 camera.brand == CameraBrand.EYE4_VSTARCAM -> {
                                     sendEye4AudioTalkChunk(camera, WearG711Utils.encodePcmToAlaw(pcmBuffer, readSamples))
+                                }
+                                camera.brand == CameraBrand.RING_CLOUD -> {
+                                    val pcmBytes = ByteArray(readSamples * 2)
+                                    for (i in 0 until readSamples) {
+                                        val s = pcmBuffer[i].toInt()
+                                        pcmBytes[i * 2] = (s and 0xFF).toByte()
+                                        pcmBytes[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+                                    }
+                                    if (connectedNodes.isNotEmpty()) {
+                                        connectedNodes.forEach { node ->
+                                            Wearable.getMessageClient(context).sendMessage(node.id, "/frcam/ring_mic", pcmBytes)
+                                        }
+                                    }
+                                    if (phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
+                                        try {
+                                            val url = URL("http://$phoneHost:49880/ring_mic?id=$doorbotId")
+                                            val conn = (url.openConnection() as HttpURLConnection).apply {
+                                                connectTimeout = 800
+                                                readTimeout = 800
+                                                requestMethod = "POST"
+                                                doOutput = true
+                                                setFixedLengthStreamingMode(pcmBytes.size)
+                                                outputStream.use { it.write(pcmBytes) }
+                                            }
+                                            conn.responseCode
+                                            conn.disconnect()
+                                        } catch (_: Exception) {}
+                                    }
                                 }
                                 talk != null -> {
                                     val (session, isUlaw) = talk

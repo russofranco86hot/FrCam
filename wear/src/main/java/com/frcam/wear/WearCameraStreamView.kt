@@ -113,16 +113,57 @@ fun WearCameraStreamView(
         contentAlignment = Alignment.Center
     ) {
         when {
-            // 1. Cámaras Ring Cloud (Streaming MJPEG en tiempo real + Snapshots dinámicos)
+            // 1. Cámaras Ring Cloud (Streaming MJPEG en tiempo real + Audio L16 + Snapshots dinámicos)
             isRing -> {
+                val audioPlayer = remember { WearCameraAudioPlayer(8000) }
+                val doorbotId = remember(camera.deviceId) {
+                    camera.deviceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
+                }
+                val phoneHost = remember(camera.remoteHost, camera.host) {
+                    (WearCameraStorage.lastKnownPhoneIp ?: camera.remoteHost.ifBlank { camera.host })
+                        .trim().removePrefix("http://").substringBefore(":")
+                }
+
+                DisposableEffect(audioPlayer) {
+                    onDispose {
+                        audioPlayer.release()
+                    }
+                }
+
+                LaunchedEffect(isMuted) {
+                    audioPlayer.setMuted(isMuted)
+                }
+
+                LaunchedEffect(isMuted, phoneHost, doorbotId) {
+                    if (!isMuted && doorbotId > 0L && phoneHost.isNotBlank() && !phoneHost.endsWith(".")) {
+                        withContext(Dispatchers.IO) {
+                            try {
+                                val audioUrl = "http://$phoneHost:49880/ring_audio?id=$doorbotId"
+                                val conn = (URL(audioUrl).openConnection() as HttpURLConnection).apply {
+                                    connectTimeout = 3000
+                                    readTimeout = 4000
+                                }
+                                if (conn.responseCode in 200..299) {
+                                    val input = BufferedInputStream(conn.inputStream, 4096)
+                                    val buffer = ByteArray(640)
+                                    while (isActive && !isMuted) {
+                                        val read = input.read(buffer)
+                                        if (read <= 0) break
+                                        val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
+                                        audioPlayer.playAudioFrame(chunk, isAlaw = false)
+                                    }
+                                }
+                                conn.disconnect()
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+
                 LaunchedEffect(camera.id, retryKey) {
                     isConnecting = true
                     errorMessage = null
                     val token = camera.password.trim()
                     val snapUrl = camera.customStreamUrl.takeIf { it.startsWith("http") }
-                    val doorbotId = camera.deviceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
-                    val phoneHost = (WearCameraStorage.lastKnownPhoneIp ?: camera.remoteHost.ifBlank { camera.host })
-                        .trim().removePrefix("http://").substringBefore(":")
 
                     var failCount = 0
                     var updateCounter = 0

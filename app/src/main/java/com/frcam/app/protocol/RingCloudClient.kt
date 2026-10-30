@@ -46,6 +46,21 @@ object RingCloudClient {
 
     private val snapshotCache = java.util.concurrent.ConcurrentHashMap<Long, RingFrame>()
     private val liveFrameCache = java.util.concurrent.ConcurrentHashMap<Long, Bitmap>()
+    private val audioQueues = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.ConcurrentLinkedQueue<ByteArray>>()
+
+    fun feedAudioChunk(doorbotId: Long, pcmBytes: ByteArray) {
+        val q = audioQueues.getOrPut(doorbotId) { java.util.concurrent.ConcurrentLinkedQueue() }
+        q.add(pcmBytes)
+        while (q.size > 25) {
+            q.poll()
+        }
+    }
+
+    fun pollAudioChunk(doorbotId: Long): ByteArray? = audioQueues[doorbotId]?.poll()
+
+    fun clearAudio(doorbotId: Long) {
+        audioQueues[doorbotId]?.clear()
+    }
 
     fun getActiveAccessToken(): String = cachedAccessToken
     fun getActiveToken(): String = cachedAccessToken.ifBlank { cachedRefreshToken }

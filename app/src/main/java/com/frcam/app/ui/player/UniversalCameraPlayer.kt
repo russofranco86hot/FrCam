@@ -721,6 +721,7 @@ private fun RingWebRtcLayer(
                 webViewClient = WebViewClient()
                 addJavascriptInterface(
                     RingJsBridge(
+                        doorbotId = doorbotId,
                         session = session,
                         liveCb = { res -> mainHandler.post { currentOnLive(res) } },
                         statusCb = { s -> mainHandler.post { currentOnStatus(s) } },

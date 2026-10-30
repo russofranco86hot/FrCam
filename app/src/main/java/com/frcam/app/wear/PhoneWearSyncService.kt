@@ -20,6 +20,13 @@ class PhoneWearSyncService : WearableListenerService() {
         private const val REQUEST_SYNC_PATH = "/frcam/request_sync"
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        try {
+            PhoneWearSyncEngine.startLanSyncServer(applicationContext) { emptyList() }
+        } catch (_: Exception) {}
+    }
+
     override fun onMessageReceived(messageEvent: MessageEvent) {
         if (messageEvent.path == REQUEST_SYNC_PATH) {
             val sourceId = messageEvent.sourceNodeId
@@ -33,6 +40,21 @@ class PhoneWearSyncService : WearableListenerService() {
                     Log.e(TAG, "Error procesando solicitud de sincronización en celular", e)
                 }
             }
+        } else if (messageEvent.path == "/frcam/ring_mic") {
+            try {
+                val b64 = android.util.Base64.encodeToString(messageEvent.data, android.util.Base64.NO_WRAP)
+                com.frcam.app.protocol.RingWebRtcController.deliverMicChunk(b64)
+            } catch (_: Exception) {}
+        } else if (messageEvent.path == "/frcam/set_motion") {
+            try {
+                val text = String(messageEvent.data, Charsets.UTF_8)
+                val parts = text.split(":")
+                if (parts.size >= 2) {
+                    val id = parts[0]
+                    val enabled = parts[1].toBoolean()
+                    PhoneWearSyncEngine.onToggleMotion?.invoke(id, enabled, if (enabled) "GIF" else "OFF")
+                }
+            } catch (_: Exception) {}
         }
     }
 }

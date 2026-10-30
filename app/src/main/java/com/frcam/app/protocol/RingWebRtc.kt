@@ -190,30 +190,43 @@ class RingLiveSession(
 
 /** Control del WebView WebRTC activo (altavoz y micrófono). */
 object RingWebRtcController {
-    private var webViewRef: WeakReference<WebView>? = null
-    private var activeCameraId: String? = null
+    private val webViews = java.util.concurrent.ConcurrentHashMap<String, WeakReference<WebView>>()
 
     fun register(cameraId: String, webView: WebView) {
-        activeCameraId = cameraId
-        webViewRef = WeakReference(webView)
+        webViews[cameraId] = WeakReference(webView)
     }
 
     fun unregister(cameraId: String) {
-        if (activeCameraId == cameraId) {
-            activeCameraId = null
-            webViewRef = null
-        }
+        webViews.remove(cameraId)
     }
 
     fun setSpeakerMuted(muted: Boolean) {
-        val wv = webViewRef?.get() ?: return
-        wv.post { wv.evaluateJavascript("window.setSpeakerMuted && window.setSpeakerMuted($muted)", null) }
+        for (ref in webViews.values) {
+            val wv = ref.get() ?: continue
+            wv.post { wv.evaluateJavascript("window.setSpeakerMuted && window.setSpeakerMuted($muted)", null) }
+        }
     }
 
     fun setMicrophoneEnabled(cameraId: String?, enabled: Boolean) {
-        if (cameraId != null && activeCameraId != cameraId) return
-        val wv = webViewRef?.get() ?: return
-        wv.post { wv.evaluateJavascript("window.setMicEnabled && window.setMicEnabled($enabled)", null) }
+        val targets = if (cameraId != null) {
+            listOfNotNull(webViews[cameraId]?.get())
+        } else {
+            webViews.values.mapNotNull { it.get() }
+        }
+        for (wv in targets) {
+            wv.post { wv.evaluateJavascript("window.setMicEnabled && window.setMicEnabled($enabled)", null) }
+        }
+    }
+
+    fun deliverMicChunk(base64Pcm: String, targetId: String? = null) {
+        val targets = if (targetId != null) {
+            listOfNotNull(webViews[targetId]?.get())
+        } else {
+            webViews.values.mapNotNull { it.get() }
+        }
+        for (wv in targets) {
+            wv.post { wv.evaluateJavascript("window.feedRemoteMicPcm && window.feedRemoteMicPcm('$base64Pcm')", null) }
+        }
     }
 
     fun deliverAnswer(webView: WebView, sdp: String) {
@@ -229,6 +242,7 @@ object RingWebRtcController {
 
 /** Puente JS -> Kotlin. */
 class RingJsBridge(
+    private val doorbotId: Long,
     private val session: RingLiveSession,
     private val liveCb: (String) -> Unit,
     private val statusCb: (String) -> Unit,
@@ -240,6 +254,14 @@ class RingJsBridge(
     @JavascriptInterface fun onLive(resolution: String) = liveCb(resolution)
     @JavascriptInterface fun onLog(message: String) = statusCb(message)
     @JavascriptInterface fun onFail(message: String) = failCb(message)
+
+    @JavascriptInterface
+    fun onAudioChunk(base64Pcm: String) {
+        try {
+            val bytes = android.util.Base64.decode(base64Pcm, android.util.Base64.DEFAULT)
+            RingCloudClient.feedAudioChunk(doorbotId, bytes)
+        } catch (_: Exception) {}
+    }
 
     @JavascriptInterface
     fun onFrame(base64Jpeg: String) {
@@ -338,6 +360,61 @@ window.onRingIce = function(c, idx){
   pc.addIceCandidate(cand).catch(function(){});
 };
 
+var audioContext = null;
+function setupAudioCapture(stream){
+  try{
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 8000});
+    if(audioContext.state === 'suspended'){ audioContext.resume().catch(function(){}); }
+    var src = audioContext.createMediaStreamSource(stream);
+    var proc = audioContext.createScriptProcessor(2048, 1, 1);
+    proc.onaudioprocess = function(e){
+      if(audioContext && audioContext.state === 'suspended'){ audioContext.resume().catch(function(){}); }
+      var f32 = e.inputBuffer.getChannelData(0);
+      var i16 = new Int16Array(f32.length);
+      for(var i=0; i<f32.length; i++){
+        var s = Math.max(-1, Math.min(1, f32[i]));
+        i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      var bytes = new Uint8Array(i16.buffer);
+      var binary = '';
+      for(var j=0; j<bytes.byteLength; j++){ binary += String.fromCharCode(bytes[j]); }
+      A.onAudioChunk(btoa(binary));
+    };
+    src.connect(proc);
+    proc.connect(audioContext.destination);
+  }catch(err){ log('Audio capture error: ' + err.message); }
+}
+
+var micAudioCtx = null;
+window.feedRemoteMicPcm = function(b64){
+  try{
+    if(!micAudioCtx){
+      micAudioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 8000});
+      if(micAudioCtx.state === 'suspended'){ micAudioCtx.resume().catch(function(){}); }
+      var dest = micAudioCtx.createMediaStreamDestination();
+      micAudioCtx._dest = dest;
+      if(audioSender){ audioSender.replaceTrack(dest.stream.getAudioTracks()[0]); }
+    }
+    if(micAudioCtx.state === 'suspended'){ micAudioCtx.resume().catch(function(){}); }
+    var raw = atob(b64);
+    var i16 = new Int16Array(raw.length / 2);
+    for(var i=0; i<i16.length; i++){
+      i16[i] = (raw.charCodeAt(i*2) & 0xFF) | (raw.charCodeAt(i*2+1) << 8);
+    }
+    var buf = micAudioCtx.createBuffer(1, i16.length, 8000);
+    var f32 = buf.getChannelData(0);
+    for(var j=0; j<i16.length; j++){ f32[j] = i16[j] / 32768.0; }
+    var src = micAudioCtx.createBufferSource();
+    src.buffer = buf;
+    if(micAudioCtx._dest){
+      src.connect(micAudioCtx._dest);
+    } else {
+      src.connect(micAudioCtx.destination);
+    }
+    src.start();
+  }catch(err){ log('Mic inject error: ' + err.message); }
+};
+
 async function start(){
   try{
     pc = new RTCPeerConnection({
@@ -354,6 +431,9 @@ async function start(){
       if(videoEl.srcObject !== remote){ videoEl.srcObject = remote; }
       videoEl.play().catch(function(){});
       log('Pista recibida: ' + ev.track.kind);
+      if(ev.track.kind === 'audio'){
+        setupAudioCapture(remote);
+      }
     };
 
     audioSender = pc.addTransceiver('audio', {direction:'sendrecv'}).sender;
