@@ -998,12 +998,15 @@ fun LanDiscoveryDialog(
 
     // Auto-detectar SSID de la red Wi-Fi actual del móvil y restaurar credenciales
     LaunchedEffect(Unit) {
+        val (sSsid, sPass) = CameraProvisioningEngine.getSavedWifiCredentials(context)
         val (curSsid, _) = CameraProvisioningEngine.getCurrentWifiConnection(context)
-        if (!curSsid.isNullOrBlank()) {
+        if (!curSsid.isNullOrBlank() && curSsid != "<unknown ssid>") {
             homeWifiSsid = curSsid
-            if (homeWifiPassword.isBlank() && savedWifiPass.isNotBlank()) {
-                homeWifiPassword = savedWifiPass
-            }
+        } else if (homeWifiSsid.isBlank() && sSsid.isNotBlank()) {
+            homeWifiSsid = sSsid
+        }
+        if (homeWifiPassword.isBlank() && sPass.isNotBlank()) {
+            homeWifiPassword = sPass
         }
     }
 

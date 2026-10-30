@@ -56,6 +56,7 @@ import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.ConnectionMode
 import com.frcam.app.model.StreamProtocol
 import com.frcam.app.protocol.V380NativeProtocol
+import com.frcam.app.protocol.V720StreamEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -87,9 +88,9 @@ fun WearCameraStreamView(
 
     val isV380 = camera.isV380NativeProtocol()
     val isRing = camera.brand == CameraBrand.RING_CLOUD
-    val isMjpeg = !isV380 && !isRing && (
+    val isV720 = camera.isV720NativeProtocol()
+    val isMjpeg = !isV380 && !isRing && !isV720 && (
         camera.protocol == StreamProtocol.HTTP_MJPEG ||
-        camera.brand == CameraBrand.V720_NAXCLOW ||
         camera.mainStreamPath.contains("mjpeg", ignoreCase = true) ||
         camera.mainStreamPath.contains("video", ignoreCase = true) ||
         camera.mainStreamPath.contains("stream", ignoreCase = true)
@@ -475,7 +476,38 @@ fun WearCameraStreamView(
                 }
             }
 
-            // 3. Cámaras V720 / Naxclow y flujos HTTP MJPEG
+            // 3. Cámaras V720 / Naxclow nativo (UDP P2P / HTTP)
+            isV720 -> {
+                LaunchedEffect(camera.id, camera.host, retryKey) {
+                    isConnecting = true
+                    errorMessage = null
+                    V720StreamEngine.streamV720Camera(
+                        camera = camera,
+                        onFrame = { bmp ->
+                            currentBitmap = bmp
+                            isConnecting = false
+                            errorMessage = null
+                        },
+                        onError = { err ->
+                            if (currentBitmap == null) {
+                                errorMessage = err
+                                isConnecting = false
+                            }
+                        }
+                    )
+                }
+
+                currentBitmap?.let { bmp ->
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = camera.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
+
+            // 4. Flujos HTTP MJPEG estándar
             isMjpeg -> {
                 LaunchedEffect(camera.id, camera.host, retryKey) {
                     isConnecting = true

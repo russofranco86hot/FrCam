@@ -1,0 +1,353 @@
+package com.frcam.app.protocol
+
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Log
+import com.frcam.app.model.CameraConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URL
+import kotlin.coroutines.coroutineContext
+
+/**
+ * Motor de transmisión de video dedicado para cámaras V720 / Naxclow / A9 / Xiaovv.
+ *
+ * Maneja el protocolo propietario Naxclow mediante:
+ * 1. Conexión y solicitud NAT (Code 11) enviada localmente (UDP/TCP 6123, 10002) y vía MQTT a v720.p2p.naxclow.com:1883.
+ * 2. Recepción de fragmentos MJPEG sobre canal UDP de datos.
+ * 3. Sondeo HTTP concurrente para variantes de cámaras con endpoints MJPEG directos.
+ */
+object V720StreamEngine {
+    private const val TAG = "V720StreamEngine"
+
+    suspend fun streamV720Camera(
+        camera: CameraConfig,
+        onFrame: (Bitmap) -> Unit,
+        onError: (String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val host = camera.host.trim()
+        val rawId = camera.deviceId.ifBlank {
+            camera.name.substringAfter("(").substringBefore(")").trim()
+        }
+        val cleanDevId = rawId.filter { it.isLetterOrDigit() }
+        val localIp = getLocalIpv4Address() ?: "127.0.0.1"
+
+        Log.d(TAG, "Iniciando stream V720 para host=$host, deviceId=$cleanDevId, localIp=$localIp")
+
+        // 1. Probar primero si la cámara expone stream HTTP MJPEG directo
+        val httpSuccess = tryHttpStream(host, camera.httpPort, onFrame)
+        if (httpSuccess) {
+            Log.d(TAG, "Stream V720 completado vía HTTP")
+            return@withContext
+        }
+
+        // 2. Probar protocolo propietario Naxclow UDP/TCP en puerto 6123 / 10002
+        val udpSuccess = tryUdpP2pStream(host, cleanDevId, localIp, onFrame)
+        if (udpSuccess) {
+            Log.d(TAG, "Stream V720 completado vía UDP P2P")
+            return@withContext
+        }
+
+        onError("No se pudo iniciar video V720. Verifica que la cámara esté encendida en la misma red Wi-Fi.")
+    }
+
+    private suspend fun tryHttpStream(
+        host: String,
+        defaultPort: Int,
+        onFrame: (Bitmap) -> Unit
+    ): Boolean {
+        if (host.isBlank()) return false
+        val portsToCheck = listOf(defaultPort, 80, 8080, 81, 6123, 8888, 5000).distinct()
+        val pathsToCheck = listOf("/video", "/stream", "/cam.mjpg", "/live.mjpg", "/mjpeg/1", "/snapshot", "/jpg/image.jpg")
+
+        for (port in portsToCheck) {
+            if (!isTcpPortOpen(host, port, 300)) continue
+            for (path in pathsToCheck) {
+                val urlStr = "http://$host:$port$path"
+                var conn: HttpURLConnection? = null
+                try {
+                    conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 800
+                        readTimeout = 2500
+                        requestMethod = "GET"
+                        setRequestProperty("User-Agent", "FrCam/1.0")
+                        setRequestProperty("Accept", "*/*")
+                    }
+                    val code = conn.responseCode
+                    val contentType = conn.contentType.orEmpty().lowercase()
+                    if (code in 200..299 && (contentType.contains("multipart") || contentType.contains("image") || contentType.contains("video") || contentType.contains("octet"))) {
+                        Log.d(TAG, "HTTP V720 activo en $urlStr ($contentType)")
+                        val inStream = BufferedInputStream(conn.inputStream, 16384)
+                        val buf = ByteArrayOutputStream(65536)
+                        var prevByte = -1
+                        var inFrame = false
+                        var frameCount = 0
+
+                        while (coroutineContext.isActive) {
+                            val b = inStream.read()
+                            if (b == -1) break
+                            if (!inFrame) {
+                                if (prevByte == 0xFF && b == 0xD8) {
+                                    inFrame = true
+                                    buf.reset()
+                                    buf.write(0xFF)
+                                    buf.write(0xD8)
+                                }
+                            } else {
+                                buf.write(b)
+                                if (prevByte == 0xFF && b == 0xD9) {
+                                    val bytes = buf.toByteArray()
+                                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                    if (bmp != null) {
+                                        onFrame(bmp)
+                                        frameCount++
+                                    }
+                                    inFrame = false
+                                    buf.reset()
+                                } else if (buf.size() > 1_500_000) {
+                                    inFrame = false
+                                    buf.reset()
+                                }
+                            }
+                            prevByte = b
+                        }
+                        if (frameCount > 0) return true
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    try { conn?.disconnect() } catch (_: Exception) {}
+                }
+            }
+        }
+        return false
+    }
+
+    private suspend fun tryUdpP2pStream(
+        host: String,
+        deviceId: String,
+        localIp: String,
+        onFrame: (Bitmap) -> Unit
+    ): Boolean = withContext(Dispatchers.IO) {
+        var socket: DatagramSocket? = null
+        try {
+            socket = DatagramSocket()
+            socket.soTimeout = 2500
+            val localPort = socket.localPort
+
+            val natReqJson = """{"code":11,"cliTarget":"frcam","cliToken":"55ABfb77","cliIp":"$localIp","cliPort":$localPort,"cliNatIp":"$localIp","cliNatPort":$localPort}"""
+            val natReqBytes = natReqJson.toByteArray(Charsets.UTF_8)
+
+            // A) Enviar por UDP a la cámara local en puertos 6123, 10002 y 10003
+            if (host.isNotBlank()) {
+                try {
+                    val destAddr = InetAddress.getByName(host)
+                    for (p in listOf(6123, 10002, 10003, 16123)) {
+                        try {
+                            socket.send(DatagramPacket(natReqBytes, natReqBytes.size, destAddr, p))
+                        } catch (_: Exception) {}
+                    }
+                } catch (_: Exception) {}
+
+                // B) Enviar por TCP a la cámara local en puerto 6123
+                try {
+                    Socket().use { tcpSocket ->
+                        tcpSocket.soTimeout = 1000
+                        tcpSocket.connect(InetSocketAddress(host, 6123), 1000)
+                        val out = tcpSocket.getOutputStream()
+                        out.write(natReqBytes)
+                        out.flush()
+                    }
+                } catch (_: Exception) {}
+            }
+
+            // C) Si se conoce el ID de dispositivo, enviar también al broker MQTT oficial de Naxclow
+            if (deviceId.isNotBlank() && deviceId.length >= 6) {
+                try {
+                    sendMqttNatReq(deviceId, natReqJson)
+                } catch (e: Exception) {
+                    Log.w(TAG, "No se pudo enviar NAT_REQ vía MQTT: ${e.message}")
+                }
+            }
+
+            val recvBuf = ByteArray(8192)
+            val packet = DatagramPacket(recvBuf, recvBuf.size)
+            val jpegStreamBuf = ByteArrayOutputStream(131072)
+            var prevByte = -1
+            var capturingJpeg = false
+            var receivedFrames = 0
+            val startTime = System.currentTimeMillis()
+
+            while (coroutineContext.isActive) {
+                try {
+                    socket.receive(packet)
+                    val len = packet.length
+                    val data = packet.data
+
+                    // Si recibimos handshake code 20 {"code":20}, responder inmediatamente code 21
+                    if (len in 8..128) {
+                        val text = String(data, 0, len, Charsets.UTF_8)
+                        if (text.contains("\"code\":20") || text.contains("\"code\": 20")) {
+                            val rsp = """{"code":21,"ip":"$localIp","port":$localPort}""".toByteArray(Charsets.UTF_8)
+                            socket.send(DatagramPacket(rsp, rsp.size, packet.address, packet.port))
+                            Log.d(TAG, "Handshake V720 code 20 recibido, respondido code 21 a ${packet.address}")
+                            continue
+                        }
+                    }
+
+                    // Ensamblar frames JPEG a partir de los paquetes UDP recibidos
+                    for (i in 0 until len) {
+                        val b = data[i].toInt() and 0xFF
+                        if (!capturingJpeg) {
+                            if (prevByte == 0xFF && b == 0xD8) {
+                                capturingJpeg = true
+                                jpegStreamBuf.reset()
+                                jpegStreamBuf.write(0xFF)
+                                jpegStreamBuf.write(0xD8)
+                            }
+                        } else {
+                            jpegStreamBuf.write(b)
+                            if (prevByte == 0xFF && b == 0xD9) {
+                                val bytes = jpegStreamBuf.toByteArray()
+                                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                if (bmp != null) {
+                                    onFrame(bmp)
+                                    receivedFrames++
+                                }
+                                capturingJpeg = false
+                                jpegStreamBuf.reset()
+                            } else if (jpegStreamBuf.size() > 1_500_000) {
+                                capturingJpeg = false
+                                jpegStreamBuf.reset()
+                            }
+                        }
+                        prevByte = b
+                    }
+
+                    // Enviar confirmación periódica de recepción a la cámara para mantener el stream activo
+                    if (receivedFrames > 0 && receivedFrames % 10 == 0) {
+                        val ack = """{"code":605,"p":1}""".toByteArray(Charsets.UTF_8)
+                        socket.send(DatagramPacket(ack, ack.size, packet.address, packet.port))
+                    }
+                } catch (e: java.net.SocketTimeoutException) {
+                    if (receivedFrames == 0 && (System.currentTimeMillis() - startTime) > 4000L) {
+                        break
+                    }
+                }
+            }
+            receivedFrames > 0
+        } catch (e: Exception) {
+            Log.w(TAG, "Error en tryUdpP2pStream: ${e.message}")
+            false
+        } finally {
+            try { socket?.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun sendMqttNatReq(deviceId: String, payloadJson: String) {
+        Socket().use { sock ->
+            sock.soTimeout = 2000
+            sock.connect(InetSocketAddress("v720.p2p.naxclow.com", 1883), 1500)
+            val out = sock.getOutputStream()
+
+            // 1. MQTT CONNECT
+            val clientId = "frcam_" + System.currentTimeMillis().toString().takeLast(6)
+            val connectPacket = buildMqttConnectPacket(clientId)
+            out.write(connectPacket)
+            out.flush()
+
+            // 2. MQTT PUBLISH
+            val topic = "Naxclow/P2P/Users/Device/sub/$deviceId"
+            val publishPacket = buildMqttPublishPacket(topic, payloadJson)
+            out.write(publishPacket)
+            out.flush()
+            Log.d(TAG, "NAT_REQ publicado en MQTT $topic")
+        }
+    }
+
+    private fun buildMqttConnectPacket(clientId: String): ByteArray {
+        val clientIdBytes = clientId.toByteArray(Charsets.UTF_8)
+        val varHeader = byteArrayOf(
+            0x00, 0x04, 'M'.code.toByte(), 'Q'.code.toByte(), 'T'.code.toByte(), 'T'.code.toByte(),
+            0x04, // protocol level 4 (MQTT 3.1.1)
+            0x02, // connect flags: Clean Session
+            0x00, 0x3C // Keep Alive: 60 sec
+        )
+        val payload = ByteArray(2 + clientIdBytes.size)
+        payload[0] = (clientIdBytes.size shr 8).toByte()
+        payload[1] = (clientIdBytes.size and 0xFF).toByte()
+        System.arraycopy(clientIdBytes, 0, payload, 2, clientIdBytes.size)
+
+        val remLen = varHeader.size + payload.size
+        val out = ByteArrayOutputStream()
+        out.write(0x10) // CONNECT packet type
+        encodeRemainingLength(out, remLen)
+        out.write(varHeader)
+        out.write(payload)
+        return out.toByteArray()
+    }
+
+    private fun buildMqttPublishPacket(topic: String, message: String): ByteArray {
+        val topicBytes = topic.toByteArray(Charsets.UTF_8)
+        val msgBytes = message.toByteArray(Charsets.UTF_8)
+
+        val out = ByteArrayOutputStream()
+        out.write(0x30) // PUBLISH packet type, QoS 0
+        val remLen = 2 + topicBytes.size + msgBytes.size
+        encodeRemainingLength(out, remLen)
+        out.write((topicBytes.size shr 8))
+        out.write((topicBytes.size and 0xFF))
+        out.write(topicBytes)
+        out.write(msgBytes)
+        return out.toByteArray()
+    }
+
+    private fun encodeRemainingLength(out: ByteArrayOutputStream, len: Int) {
+        var x = len
+        do {
+            var encodedByte = x % 128
+            x /= 128
+            if (x > 0) encodedByte = encodedByte or 128
+            out.write(encodedByte)
+        } while (x > 0)
+    }
+
+    private fun getLocalIpv4Address(): String? {
+        return try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            for (intf in interfaces) {
+                if (!intf.isUp || intf.isLoopback) continue
+                for (addr in intf.inetAddresses.toList()) {
+                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
+                        val ip = addr.hostAddress ?: continue
+                        if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
+                            return ip
+                        }
+                    }
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isTcpPortOpen(ip: String, port: Int, timeoutMs: Int = 300): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(ip, port), timeoutMs)
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+}

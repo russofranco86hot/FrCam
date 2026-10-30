@@ -348,6 +348,10 @@ data class CameraConfig(
             customStreamUrl.isBlank()
     }
 
+    fun isV720NativeProtocol(): Boolean {
+        return brand == CameraBrand.V720_NAXCLOW || protocol == StreamProtocol.V720_LAN
+    }
+
     fun displayAddressLabel(): String {
         return if (isRingCloudNative()) {
             "Ring Cloud ID: $deviceId"
@@ -370,6 +374,16 @@ data class CameraConfig(
     fun buildStreamUrl(useSubStream: Boolean = false): String {
         if (isRingCloudNative()) {
             return "ring://cloud/${deviceId.trim()}"
+        }
+        if (isV720NativeProtocol()) {
+            val cleanHost = host.trim()
+                .removePrefix("http://")
+                .removePrefix("https://")
+                .removePrefix("rtsp://")
+                .substringBefore("/")
+                .substringBefore(":")
+            val targetHost = cleanHost.ifBlank { "127.0.0.1" }
+            return "v720://$targetHost:6123?devId=${deviceId.trim()}"
         }
         if (isV380NativeProtocol()) {
             val modeTag = if (connectionMode == ConnectionMode.CLOUD_DEVICE_ID || host.isBlank()) "cloud" else "lan"
@@ -434,7 +448,7 @@ data class CameraConfig(
 
     fun buildCandidateUrls(useSubStream: Boolean = false): List<String> {
         val primary = buildStreamUrl(useSubStream)
-        if (isV380NativeProtocol() || isRingCloudNative()) {
+        if (isV380NativeProtocol() || isRingCloudNative() || isV720NativeProtocol()) {
             return listOf(primary)
         }
         val candidates = mutableListOf(primary)

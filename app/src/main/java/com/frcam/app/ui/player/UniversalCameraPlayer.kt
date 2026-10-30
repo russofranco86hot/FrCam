@@ -99,6 +99,7 @@ import com.frcam.app.protocol.RingLiveSession
 import com.frcam.app.protocol.RingWebRtcController
 import com.frcam.app.protocol.RingWebRtcHtml
 import com.frcam.app.protocol.V380NativeProtocol
+import com.frcam.app.protocol.V720StreamEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -161,6 +162,7 @@ fun UniversalCameraPlayer(
 
     val isV380Native = remember(camera) { camera.isV380NativeProtocol() }
     val isRingNative = remember(camera) { camera.isRingCloudNative() }
+    val isV720Native = remember(camera) { camera.isV720NativeProtocol() }
     val isOutsideHome = remember(camera.host) {
         !NetworkCameraScanner.isSameLocalSubnet(camera.host)
     }
@@ -179,8 +181,8 @@ fun UniversalCameraPlayer(
     var retryCounter by remember { mutableIntStateOf(0) }
     val activeUrl = candidateUrls.getOrElse(candidateIndex) { camera.buildStreamUrl(useSubStream) }
 
-    val isMjpegHttp = remember(activeUrl, camera.protocol, isV380Native, isRingNative) {
-        !isV380Native && !isRingNative && (
+    val isMjpegHttp = remember(activeUrl, camera.protocol, isV380Native, isRingNative, isV720Native) {
+        !isV380Native && !isRingNative && !isV720Native && (
             camera.protocol == StreamProtocol.HTTP_MJPEG ||
                 (activeUrl.startsWith("http://", ignoreCase = true) && !activeUrl.endsWith(".m3u8"))
             )
@@ -346,6 +348,23 @@ fun UniversalCameraPlayer(
                     camera = camera,
                     useSubStream = useSubStream,
                     isMuted = isMuted,
+                    retryKey = retryCounter,
+                    captureHandle = internalHandle,
+                    onResolution = { res -> onResolutionChanged?.invoke(res) },
+                    onManualRetry = { retryCounter++ },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offsetX,
+                            translationY = offsetY
+                        )
+                )
+            }
+            isV720Native -> {
+                V720HardwareStreamSurface(
+                    camera = camera,
                     retryKey = retryCounter,
                     captureHandle = internalHandle,
                     onResolution = { res -> onResolutionChanged?.invoke(res) },
@@ -1143,6 +1162,62 @@ private fun MjpegStreamSurface(
         StreamOverlayState(
             streamState = streamState,
             streamUrl = streamUrl,
+            errorMessage = errorMessage,
+            onRetry = onManualRetry
+        )
+    }
+}
+
+@Composable
+private fun V720HardwareStreamSurface(
+    camera: CameraConfig,
+    retryKey: Int,
+    captureHandle: CameraFrameCaptureHandle,
+    onResolution: (String) -> Unit,
+    onManualRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var streamState by remember(camera.id, retryKey) { mutableStateOf(StreamState.CONNECTING) }
+    var errorMessage by remember(camera.id, retryKey) { mutableStateOf("") }
+    var currentFrame by remember(camera.id, retryKey) { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(camera.id, camera.host, camera.deviceId, retryKey) {
+        streamState = StreamState.CONNECTING
+        errorMessage = ""
+        V720StreamEngine.streamV720Camera(
+            camera = camera,
+            onFrame = { bmp ->
+                if (currentFrame == null) {
+                    onResolution("${bmp.width}x${bmp.height} V720")
+                }
+                currentFrame = bmp
+                captureHandle.latestBitmapRef = bmp
+                if (streamState != StreamState.LIVE) {
+                    streamState = StreamState.LIVE
+                }
+            },
+            onError = { err ->
+                if (streamState != StreamState.LIVE) {
+                    streamState = StreamState.ERROR
+                    errorMessage = err
+                }
+            }
+        )
+    }
+
+    Box(modifier = modifier) {
+        currentFrame?.let { bmp ->
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = "V720 Live Frame",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        StreamOverlayState(
+            streamState = streamState,
+            streamUrl = "V720 (${camera.host.ifBlank { camera.deviceId }})",
             errorMessage = errorMessage,
             onRetry = onManualRetry
         )
