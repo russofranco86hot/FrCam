@@ -494,7 +494,8 @@ object BluetoothCameraEngine {
         val localIp = NetworkCameraScanner.getLocalIpv4Address()
         val subnetPrefix = localIp?.substringBeforeLast(".").orEmpty()
         if (subnetPrefix.isNotBlank()) {
-            val v720Ports = listOf(6123, 10002, 10003, 16123, 6600, 6001, 8080, 80)
+            // Únicamente puertos propietarios V720 / Naxclow (NUNCA 80 u 8080 para evitar falsos positivos con routers, PCs o Smart TVs)
+            val v720Ports = listOf(6123, 10002, 10003, 16123, 6600)
             val foundIp = coroutineScope {
                 (1..254).map { octet ->
                     async {

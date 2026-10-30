@@ -96,7 +96,7 @@ object CameraProvisioningEngine {
             clean.startsWith("MV") -> true to CameraBrand.V380_PRO
             clean.startsWith("NAX_") || clean.startsWith("V720_") || clean.startsWith("JA_") ||
                 clean.startsWith("FT_") || clean.startsWith("BAT_") || clean.startsWith("A9_") ||
-                clean.startsWith("MINI_") || clean.contains("V720") -> true to CameraBrand.V720_NAXCLOW
+                clean.startsWith("ACCQ_") || clean.startsWith("MINI_") || clean.contains("V720") -> true to CameraBrand.V720_NAXCLOW
             clean.startsWith("VSTC") || clean.startsWith("IPCAM-") || clean.startsWith("EYE4-") ||
                 clean.startsWith("VSTAR") -> true to CameraBrand.EYE4_VSTARCAM
             clean.startsWith("CARE-AP") || clean.startsWith("GW_AP") || clean.startsWith("CLOUDCAM") -> true to CameraBrand.ONVIF_GENERIC
@@ -382,48 +382,74 @@ object CameraProvisioningEngine {
             }
 
             CameraBrand.V720_NAXCLOW -> {
-                // Enviar tanto por HTTP como por UDP a la cámara V720 en modo AP
+                // Protocolo nativo V720 / Naxclow sobre TCP y UDP en puerto 6123
                 var sentSuccess = false
-                val v720Urls = listOf(
-                    "http://$targetIp/set_wifi?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}",
-                    "http://$targetIp/cgi-bin/wifi.cgi?action=set&ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&key=${URLEncoder.encode(homePass, "UTF-8")}",
-                    "http://$targetIp/wifi_cfg?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}",
-                    "http://$targetIp:8080/set_wifi?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}"
+
+                // 1. Enviar comando Wi-Fi por TCP directo a la cámara en modo AP (puerto 6123)
+                val v720Payloads = listOf(
+                    """{"code":204,"s":"${homeSsid.trim()}","p":"$homePass"}""",
+                    """{"s":"${homeSsid.trim()}","p":"$homePass"}""",
+                    """{"cmd":"set_wifi","ssid":"${homeSsid.trim()}","password":"$homePass"}"""
                 )
-                for (urlStr in v720Urls) {
+
+                for (payload in v720Payloads) {
                     try {
-                        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 2500
-                            readTimeout = 2500
-                            requestMethod = "GET"
-                        }
-                        if (conn.responseCode in 200..299) {
-                            conn.disconnect()
+                        Socket().use { tcpSocket ->
+                            tcpSocket.soTimeout = 2000
+                            tcpSocket.connect(InetSocketAddress(targetIp, 6123), 2000)
+                            val out = tcpSocket.getOutputStream()
+                            out.write(payload.toByteArray(Charsets.UTF_8))
+                            out.flush()
                             sentSuccess = true
-                            break
                         }
-                        conn.disconnect()
                     } catch (e: Exception) {
                         lastError = e.message
                     }
                 }
 
-                // Enviar también por Broadcast UDP en puertos V720 (6123 y 16123)
+                // 2. Enviar por UDP en puertos 6123 y 16123
                 try {
                     DatagramSocket().use { udpSocket ->
                         udpSocket.broadcast = true
-                        val udpPayload = "SETWIFI^${homeSsid.trim()}^${homePass}^2\n".toByteArray(Charsets.UTF_8)
                         val targets = listOf(
                             InetAddress.getByName(targetIp),
                             InetAddress.getByName("255.255.255.255")
                         )
+                        for (payload in v720Payloads) {
+                            val bytes = payload.toByteArray(Charsets.UTF_8)
+                            for (dest in targets) {
+                                udpSocket.send(DatagramPacket(bytes, bytes.size, dest, 6123))
+                                udpSocket.send(DatagramPacket(bytes, bytes.size, dest, 16123))
+                            }
+                        }
+                        val legacyPayload = "SETWIFI^${homeSsid.trim()}^${homePass}^2\n".toByteArray(Charsets.UTF_8)
                         for (dest in targets) {
-                            udpSocket.send(DatagramPacket(udpPayload, udpPayload.size, dest, 6123))
-                            udpSocket.send(DatagramPacket(udpPayload, udpPayload.size, dest, 16123))
+                            udpSocket.send(DatagramPacket(legacyPayload, legacyPayload.size, dest, 6123))
                         }
                         sentSuccess = true
                     }
                 } catch (_: Exception) {}
+
+                // 3. Respaldo HTTP para variantes con firmware que exponen endpoint web
+                val v720Urls = listOf(
+                    "http://$targetIp/set_wifi?ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&pwd=${URLEncoder.encode(homePass, "UTF-8")}",
+                    "http://$targetIp/cgi-bin/wifi.cgi?action=set&ssid=${URLEncoder.encode(homeSsid, "UTF-8")}&key=${URLEncoder.encode(homePass, "UTF-8")}"
+                )
+                for (urlStr in v720Urls) {
+                    try {
+                        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 1500
+                            readTimeout = 1500
+                            requestMethod = "GET"
+                        }
+                        if (conn.responseCode in 200..299) {
+                            sentSuccess = true
+                            conn.disconnect()
+                            break
+                        }
+                        conn.disconnect()
+                    } catch (_: Exception) {}
+                }
 
                 if (sentSuccess) {
                     return@withContext Result.success(
