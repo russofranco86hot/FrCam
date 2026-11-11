@@ -475,7 +475,7 @@ data class CameraConfig(
 
         when (brand) {
             CameraBrand.EYE4_VSTARCAM -> {
-                val ports = listOf(rtspPort, 10554, 554).distinct()
+                val ports = listOf(rtspPort, 10554, 554).filter { it > 0 }.distinct()
                 val paths = if (useSubStream) {
                     listOf(subStreamPath, "/tcp/av0_1", "/12", "/tcp/av0_0", "/11").distinct()
                 } else {
@@ -489,7 +489,7 @@ data class CameraConfig(
                 }
             }
             CameraBrand.V380_PRO -> {
-                val ports = listOf(rtspPort, 554, 8554).distinct()
+                val ports = listOf(rtspPort, 554, 8554).filter { it > 0 }.distinct()
                 val paths = if (useSubStream) {
                     listOf(subStreamPath, "/live/ch00_0", "/live/ch00_1", "/live/ch0").distinct()
                 } else {
@@ -499,6 +499,34 @@ data class CameraConfig(
                     for (path in paths) {
                         val url = "rtsp://$creds$cleanHost:$p${if (path.startsWith("/")) path else "/$path"}"
                         if (url !in candidates) candidates.add(url)
+                    }
+                }
+            }
+            CameraBrand.HIKVISION -> {
+                val ports = listOf(rtspPort, 554, 8554, 10554).filter { it > 0 }.distinct()
+                val paths = listOf(
+                    mainStreamPath, subStreamPath,
+                    "/Streaming/Channels/101", "/Streaming/Channels/102",
+                    "/h264/ch1/main/av_stream", "/h264/ch1/sub/av_stream",
+                    "/live/ch0", "/stream1", "/11"
+                ).distinct()
+                val credVariations = if (password.isBlank() && username.isNotBlank()) {
+                    listOf(
+                        creds,
+                        "${username.trim()}:12345@",
+                        "${username.trim()}:123456@",
+                        "${username.trim()}:admin123@",
+                        "${username.trim()}:admin@"
+                    )
+                } else {
+                    listOf(creds)
+                }
+                for (cVar in credVariations) {
+                    for (p in ports) {
+                        for (path in paths) {
+                            val url = "rtsp://$cVar$cleanHost:$p${if (path.startsWith("/")) path else "/$path"}"
+                            if (url !in candidates) candidates.add(url)
+                        }
                     }
                 }
             }
@@ -518,14 +546,33 @@ data class CameraConfig(
                 }
             }
             else -> {
-                for (path in brand.fallbackPaths) {
+                val effectiveRtsp = if (rtspPort > 0) rtspPort else 554
+                val effectiveHttp = if (httpPort > 0) httpPort else 80
+                val allPaths = (brand.fallbackPaths + listOf(
+                    "/live/ch0", "/live/ch1", "/stream1", "/stream2",
+                    "/Streaming/Channels/101", "/h264/ch1/main/av_stream", "/11",
+                    "/video", "/stream", "/cam.mjpg", "/mjpeg/1", "/snapshot.jpg"
+                )).distinct()
+
+                for (path in allPaths) {
                     val norm = if (path.startsWith("/")) path else "/$path"
-                    val url = if (protocol == StreamProtocol.HTTP_MJPEG) {
-                        "http://$creds$cleanHost:$httpPort$norm"
+                    val isHttpPath = norm.contains("video") || norm.contains("stream") || norm.contains("mjpg") || norm.contains("snapshot")
+                    if (protocol == StreamProtocol.HTTP_MJPEG || (rtspPort == 0 && isHttpPath)) {
+                        val url = "http://$creds$cleanHost:$effectiveHttp$norm"
+                        if (url !in candidates) candidates.add(url)
                     } else {
-                        "rtsp://$creds$cleanHost:$rtspPort$norm"
+                        val url = "rtsp://$creds$cleanHost:$effectiveRtsp$norm"
+                        if (url !in candidates) candidates.add(url)
                     }
-                    if (url !in candidates) candidates.add(url)
+                }
+                // Fallback HTTP para cualquier cámara que falle en RTSP
+                if (protocol != StreamProtocol.HTTP_MJPEG) {
+                    for (httpP in listOf(effectiveHttp, 8080, 81).distinct()) {
+                        for (p in listOf("/video", "/stream", "/mjpeg/1", "/snapshot.jpg")) {
+                            val hUrl = "http://$creds$cleanHost:$httpP$p"
+                            if (hUrl !in candidates) candidates.add(hUrl)
+                        }
+                    }
                 }
             }
         }

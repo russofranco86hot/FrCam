@@ -23,6 +23,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -32,7 +35,10 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.FilterChip
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileDownload
@@ -120,12 +126,35 @@ fun CameraDashboardScreen(
     onOpenGallery: () -> Unit,
     onSyncToWatch: (() -> Unit)? = null,
     onExportCameras: (Context, Uri, (String) -> Unit) -> Unit,
-    onImportCameras: (Context, Uri, (Result<Int>) -> Unit) -> Unit
+    onImportCameras: (Context, Uri, (Result<Int>) -> Unit) -> Unit,
+    onUpdateCamera: ((CameraConfig) -> Unit)? = null
 ) {
     val context = LocalContext.current
     var showBackupDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var cameraToDelete by remember { mutableStateOf<CameraConfig?>(null) }
+
+    val allGroups = remember(cameras) {
+        val set = linkedSetOf("Todas")
+        cameras.forEach { cam ->
+            if (cam.groupName.isNotBlank()) set.add(cam.groupName.trim())
+        }
+        listOf("Casa", "Entrada", "Patio", "Oficina", "Garage", "Fondo").forEach { set.add(it) }
+        set.toList()
+    }
+    var selectedGroup by remember { mutableStateOf("Todas") }
+    var showNewGroupDialog by remember { mutableStateOf(false) }
+    var newGroupNameInput by remember { mutableStateOf("") }
+    var cameraToMoveGroup by remember { mutableStateOf<CameraConfig?>(null) }
+    var moveTargetGroup by remember { mutableStateOf("") }
+
+    val displayedCameras = remember(cameras, selectedGroup) {
+        if (selectedGroup == "Todas") {
+            cameras
+        } else {
+            cameras.filter { it.groupName.equals(selectedGroup, ignoreCase = true) }
+        }
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -251,6 +280,101 @@ fun CameraDashboardScreen(
             },
             dismissButton = {
                 OutlinedButton(onClick = { cameraToDelete = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    if (showNewGroupDialog) {
+        AlertDialog(
+            onDismissRequest = { showNewGroupDialog = false },
+            title = { Text("Nuevo Grupo", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = newGroupNameInput,
+                    onValueChange = { newGroupNameInput = it },
+                    label = { Text("Nombre del grupo (ej. Entrada, Fondo)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = newGroupNameInput.trim()
+                        if (trimmed.isNotBlank()) {
+                            selectedGroup = trimmed
+                        }
+                        newGroupNameInput = ""
+                        showNewGroupDialog = false
+                    }
+                ) {
+                    Text("Crear y Ver")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showNewGroupDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    if (cameraToMoveGroup != null) {
+        val targetCam = cameraToMoveGroup!!
+        AlertDialog(
+            onDismissRequest = { cameraToMoveGroup = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color(0xFF38BDF8))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Mover a Grupo", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Mover \"${targetCam.name}\" al grupo:",
+                        fontSize = 13.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    OutlinedTextField(
+                        value = moveTargetGroup,
+                        onValueChange = { moveTargetGroup = it },
+                        label = { Text("Nombre del Grupo") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf("Casa", "Entrada", "Patio", "Oficina", "Garage", "Fondo").forEach { grp ->
+                            FilterChip(
+                                selected = moveTargetGroup.equals(grp, ignoreCase = true),
+                                onClick = { moveTargetGroup = grp },
+                                label = { Text(grp, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val grp = moveTargetGroup.trim().ifBlank { "Casa" }
+                        val updated = targetCam.copy(groupName = grp)
+                        onUpdateCamera?.invoke(updated)
+                        cameraToMoveGroup = null
+                        Toast.makeText(context, "\"${targetCam.name}\" movida a '$grp'", Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    Text("Guardar")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { cameraToMoveGroup = null }) {
                     Text("Cancelar")
                 }
             }
@@ -418,39 +542,108 @@ fun CameraDashboardScreen(
             )
         }
     ) { paddingValues ->
-        if (cameras.isEmpty()) {
-            EmptyCameraOnboarding(
-                onOpenScanner = onOpenScanner,
-                onOpenRingLogin = onOpenRingLogin,
-                onQuickAddBrand = { brand -> onAddCamera(brand) },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-            )
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(gridMode.columns),
-                contentPadding = PaddingValues(
-                    start = 10.dp,
-                    end = 10.dp,
-                    top = paddingValues.calculateTopPadding() + 10.dp,
-                    bottom = paddingValues.calculateBottomPadding() + 88.dp
-                ),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                items(cameras, key = { it.id }) { camera ->
-                    CameraGridTile(
-                        camera = camera,
-                        isCompact = gridMode.columns >= 2,
-                        onToggleLiveDashboard = { active -> onToggleLiveDashboard(camera, active) },
-                        onToggleMotion = { enabled -> onToggleMotion(camera, enabled) },
-                        onOpenDetail = { onSelectCamera(camera) },
-                        onOpenFullscreen = { onOpenFullscreen(camera) },
-                        onEdit = { onEditCamera(camera) },
-                        onDelete = { cameraToDelete = camera }
-                    )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    top = paddingValues.calculateTopPadding(),
+                    bottom = paddingValues.calculateBottomPadding()
+                )
+        ) {
+            if (cameras.isNotEmpty()) {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items(allGroups) { grp ->
+                        val count = if (grp == "Todas") cameras.size else cameras.count { it.groupName.equals(grp, ignoreCase = true) }
+                        if (count > 0 || grp == "Todas") {
+                            FilterChip(
+                                selected = selectedGroup.equals(grp, ignoreCase = true),
+                                onClick = { selectedGroup = grp },
+                                label = {
+                                    Text(
+                                        text = "$grp ($count)",
+                                        fontSize = 12.sp,
+                                        fontWeight = if (selectedGroup.equals(grp, ignoreCase = true)) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    item {
+                        OutlinedButton(
+                            onClick = { showNewGroupDialog = true },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Nuevo Grupo", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+
+            if (cameras.isEmpty()) {
+                EmptyCameraOnboarding(
+                    onOpenScanner = onOpenScanner,
+                    onOpenRingLogin = onOpenRingLogin,
+                    onQuickAddBrand = { brand -> onAddCamera(brand) },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if (displayedCameras.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "No hay cámaras en el grupo '$selectedGroup'",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 14.sp
+                        )
+                        OutlinedButton(onClick = { selectedGroup = "Todas" }) {
+                            Text("Ver Todas")
+                        }
+                    }
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(gridMode.columns),
+                    contentPadding = PaddingValues(
+                        start = 10.dp,
+                        end = 10.dp,
+                        top = 4.dp,
+                        bottom = 88.dp
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(displayedCameras, key = { it.id }) { camera ->
+                        CameraGridTile(
+                            camera = camera,
+                            isCompact = gridMode.columns >= 2,
+                            onToggleLiveDashboard = { active -> onToggleLiveDashboard(camera, active) },
+                            onToggleMotion = { enabled -> onToggleMotion(camera, enabled) },
+                            onOpenDetail = { onSelectCamera(camera) },
+                            onOpenFullscreen = { onOpenFullscreen(camera) },
+                            onEdit = { onEditCamera(camera) },
+                            onDelete = { cameraToDelete = camera },
+                            onMoveGroup = { cam ->
+                                moveTargetGroup = cam.groupName
+                                cameraToMoveGroup = cam
+                            },
+                            onUpdateCamera = onUpdateCamera
+                        )
+                    }
                 }
             }
         }
@@ -466,7 +659,9 @@ private fun CameraGridTile(
     onOpenDetail: () -> Unit,
     onOpenFullscreen: () -> Unit = onOpenDetail,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onMoveGroup: (CameraConfig) -> Unit = {},
+    onUpdateCamera: ((CameraConfig) -> Unit)? = null
 ) {
     var isMuted by remember(camera.id) { mutableStateOf(true) }
     val useSubStreamInGrid = isCompact && camera.preferSubStreamInGrid
@@ -497,6 +692,7 @@ private fun CameraGridTile(
                         useSubStream = useSubStreamInGrid,
                         isMuted = isMuted,
                         enablePinchZoom = !isCompact && camera.liveInDashboard,
+                        onUpdateCamera = onUpdateCamera,
                         modifier = Modifier
                             .fillMaxSize()
                             .graphicsLayer { alpha = if (camera.liveInDashboard) 1f else 0.02f }
@@ -534,6 +730,22 @@ private fun CameraGridTile(
                             )
                         }
                     }
+                }
+
+                // Group badge Top-Left
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .background(Color(0xFF1E293B).copy(alpha = 0.85f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = camera.groupName.ifBlank { "Casa" },
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFF1F5F9)
+                    )
                 }
 
                 // Brand, Location & PTZ Badge Top-Right
@@ -649,6 +861,17 @@ private fun CameraGridTile(
                                 modifier = Modifier.size(16.dp)
                             )
                         }
+                    }
+                    IconButton(
+                        onClick = { onMoveGroup(camera) },
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DriveFileMove,
+                            contentDescription = "Mover a grupo",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(15.dp)
+                        )
                     }
                     IconButton(
                         onClick = onEdit,

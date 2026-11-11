@@ -70,7 +70,7 @@ object V720StreamEngine {
 
         // 1. Probar primero si la cámara expone stream HTTP MJPEG directo
         if (host.isNotBlank() && host != "127.0.0.1") {
-            val httpSuccess = tryHttpStream(host, camera.httpPort, onFrame)
+            val httpSuccess = tryHttpStream(host, camera.httpPort, camera.username, camera.password, onFrame)
             if (httpSuccess) {
                 Log.d(TAG, "Stream V720 completado vía HTTP")
                 return@withContext
@@ -88,7 +88,7 @@ object V720StreamEngine {
         val reResolved = resolveV720IpDirectly()
         if (!reResolved.isNullOrBlank() && reResolved != host) {
             Log.d(TAG, "Reintentando stream V720 con nueva IP resuelta: $reResolved")
-            if (tryHttpStream(reResolved, camera.httpPort, onFrame)) return@withContext
+            if (tryHttpStream(reResolved, camera.httpPort, camera.username, camera.password, onFrame)) return@withContext
             if (tryUdpP2pStream(reResolved, cleanDevId, localIp, onFrame)) return@withContext
         }
 
@@ -98,31 +98,36 @@ object V720StreamEngine {
     private suspend fun tryHttpStream(
         host: String,
         defaultPort: Int,
+        username: String = "",
+        password: String = "",
         onFrame: (Bitmap) -> Unit
     ): Boolean {
         if (host.isBlank()) return false
-        val portsToCheck = listOf(defaultPort, 80, 8080, 20190, 81, 6123, 8888, 5000, 32108).distinct()
+        val portsToCheck = listOf(defaultPort, 8080, 80, 20190, 81, 6123, 8888, 5000, 32108).distinct()
         val pathsToCheck = listOf(
             "/video", "/stream", "/cam.mjpg", "/live.mjpg", "/mjpeg/1",
             "/snapshot", "/jpg/image.jpg", "/image.jpg", "/live", "/stream.mjpg", "/snapshot.jpg", "/capture", "/"
         )
 
         for (port in portsToCheck) {
-            if (!isTcpPortOpen(host, port, 250)) continue
+            if (!isTcpPortOpen(host, port, 200)) continue
             for (path in pathsToCheck) {
                 val urlStr = "http://$host:$port$path"
                 var conn: HttpURLConnection? = null
                 try {
                     conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 800
-                        readTimeout = 2500
+                        connectTimeout = 700
+                        readTimeout = 2000
                         requestMethod = "GET"
                         setRequestProperty("User-Agent", "FrCam/1.0")
                         setRequestProperty("Accept", "*/*")
+                        if (username.isNotBlank()) {
+                            val auth = android.util.Base64.encodeToString("$username:$password".toByteArray(), android.util.Base64.NO_WRAP)
+                            setRequestProperty("Authorization", "Basic $auth")
+                        }
                     }
                     val code = conn.responseCode
-                    val contentType = conn.contentType.orEmpty().lowercase()
-                    if (code in 200..299 || code == 401) {
+                    if (code in 200..299) {
                         val inStream = BufferedInputStream(conn.inputStream, 16384)
                         val buf = ByteArrayOutputStream(65536)
                         var prevByte = -1
@@ -163,7 +168,7 @@ object V720StreamEngine {
                             Log.d(TAG, "Cámara V720 en bucle continuo de snapshots HTTP en $urlStr")
                             while (coroutineContext.isActive) {
                                 delay(90L)
-                                val snapBmp = fetchHttpSnapshot(urlStr)
+                                val snapBmp = fetchHttpSnapshot(urlStr, username, password)
                                 if (snapBmp != null) {
                                     onFrame(snapBmp)
                                 }
@@ -181,13 +186,17 @@ object V720StreamEngine {
         return false
     }
 
-    private fun fetchHttpSnapshot(urlStr: String): Bitmap? {
+    private fun fetchHttpSnapshot(urlStr: String, username: String = "", password: String = ""): Bitmap? {
         return try {
             val c = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 800
+                connectTimeout = 700
                 readTimeout = 1200
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", "FrCam/1.0")
+                if (username.isNotBlank()) {
+                    val auth = android.util.Base64.encodeToString("$username:$password".toByteArray(), android.util.Base64.NO_WRAP)
+                    setRequestProperty("Authorization", "Basic $auth")
+                }
             }
             if (c.responseCode in 200..299) {
                 val bytes = c.inputStream.use { it.readBytes() }

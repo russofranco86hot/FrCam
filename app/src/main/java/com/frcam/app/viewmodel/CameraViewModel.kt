@@ -13,6 +13,7 @@ import com.frcam.app.model.CameraDeviceInfo
 import com.frcam.app.model.ConnectionMode
 import com.frcam.app.model.DiscoveredCameraDevice
 import com.frcam.app.model.GridLayoutMode
+import com.frcam.app.model.StreamProtocol
 import com.frcam.app.model.WifiNetworkScanResult
 import com.frcam.app.protocol.CameraControlEngine
 import com.frcam.app.protocol.CameraProvisioningEngine
@@ -598,15 +599,41 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _adminStatusMessage.value = null
     }
 
+    fun addMultipleCameras(newCameras: List<CameraConfig>) {
+        viewModelScope.launch {
+            val current = cameras.value.toMutableList()
+            for (cam in newCameras) {
+                val existingIdx = current.indexOfFirst {
+                    it.id == cam.id || (it.host == cam.host && it.host.isNotBlank() && it.host != "0.0.0.0")
+                }
+                if (existingIdx >= 0) {
+                    current[existingIdx] = cam
+                } else {
+                    current.add(cam)
+                }
+            }
+            repository.saveCameras(current)
+        }
+    }
+
     fun buildConfigFromDiscovered(
         device: DiscoveredCameraDevice,
         username: String = device.detectedBrand.defaultUsername,
-        password: String = ""
+        password: String = "",
+        groupName: String = "Casa"
     ): CameraConfig {
         val mode = if (device.deviceId.isNotBlank() || device.remoteHost.isNotBlank()) {
             ConnectionMode.HYBRID_AUTO
         } else {
             ConnectionMode.LAN_IP
+        }
+        val hasRtsp = device.openPorts.contains(554) || device.openPorts.contains(8554) || device.rtspPort > 0
+        val resolvedProtocol = when {
+            device.detectedBrand == CameraBrand.V720_NAXCLOW && (device.openPorts.contains(6123) || device.openPorts.contains(20190) || device.openPorts.contains(10002)) -> StreamProtocol.V720_LAN
+            device.detectedBrand == CameraBrand.V380_PRO -> StreamProtocol.V380_NATIVE
+            hasRtsp -> StreamProtocol.RTSP
+            device.detectedBrand == CameraBrand.ANDROID_IP_WEBCAM || device.detectedBrand == CameraBrand.ESP32_CAM || device.openPorts.contains(8080) || device.openPorts.contains(81) || device.openPorts.contains(80) -> StreamProtocol.HTTP_MJPEG
+            else -> device.detectedBrand.defaultProtocol
         }
         return CameraConfig(
             name = device.deviceName,
@@ -618,15 +645,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             remoteRtspPort = device.remoteRtspPort,
             remoteHttpPort = device.remoteHttpPort,
             upnpMapped = device.upnpMapped,
-            rtspPort = device.rtspPort,
+            rtspPort = if (hasRtsp) (if (device.rtspPort > 0) device.rtspPort else 554) else 0,
             httpPort = device.httpPort,
             onvifPort = device.onvifPort,
             username = username,
             password = password,
             mainStreamPath = device.suggestedMainPath,
             subStreamPath = device.suggestedSubPath,
-            protocol = device.detectedBrand.defaultProtocol,
-            ptzType = device.detectedBrand.defaultPtzType
+            protocol = resolvedProtocol,
+            ptzType = device.detectedBrand.defaultPtzType,
+            groupName = groupName
         )
     }
 }

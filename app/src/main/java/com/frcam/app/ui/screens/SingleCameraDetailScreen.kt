@@ -315,6 +315,7 @@ fun SingleCameraDetailScreen(
                     enablePinchZoom = !isInPipMode,
                     frameCaptureHandle = frameCaptureHandle,
                     onResolutionChanged = { res -> detectedResolution = res },
+                    onUpdateCamera = onUpdateCamera,
                     modifier = Modifier.fillMaxSize()
                 )
 

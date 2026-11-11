@@ -315,6 +315,9 @@ class MainActivity : ComponentActivity() {
                         },
                         onImportCameras = { ctx, uri, callback ->
                             viewModel.importCamerasFromUri(ctx, uri, callback)
+                        },
+                        onUpdateCamera = { updatedCam ->
+                            viewModel.addOrUpdateCamera(updatedCam)
                         }
                     )
                 }
@@ -349,6 +352,13 @@ class MainActivity : ComponentActivity() {
                         scanProgress = scanProgress,
                         scanStatusText = scanStatusText,
                         discoveredDevices = discoveredDevices,
+                        existingCameraIps = cameras.map { it.host }.toSet(),
+                        onAddDiscoveredCameras = { list, targetGroup ->
+                            val configs = list.map { dev ->
+                                viewModel.buildConfigFromDiscovered(dev, groupName = targetGroup)
+                            }
+                            viewModel.addMultipleCameras(configs)
+                        },
                         onStartScan = { viewModel.startLanDiscovery() },
                         onSelectDevice = { discovered ->
                             showScannerDialog = false

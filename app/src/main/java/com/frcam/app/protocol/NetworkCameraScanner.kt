@@ -514,12 +514,28 @@ object NetworkCameraScanner {
                     deviceName = "Cámara IP Hikvision / EZVIZ ($ip)",
                     openPorts = openPorts,
                     rtspPort = 554,
-                    httpPort = 80,
+                    httpPort = if (openPorts.contains(80)) 80 else 8000,
                     onvifPort = 8000,
                     onvifServiceUrl = onvifServiceUrl,
                     suggestedMainPath = "/Streaming/Channels/101",
                     suggestedSubPath = "/Streaming/Channels/102",
-                    macOrHardwareInfo = "Puertos: ${openPorts.joinToString(", ")}"
+                    macOrHardwareInfo = "Hikvision / HiLook • Puertos: ${openPorts.joinToString(", ")}"
+                )
+            }
+
+            openPorts.contains(554) && openPorts.contains(80) -> {
+                DiscoveredCameraDevice(
+                    ipAddress = ip,
+                    detectedBrand = CameraBrand.HIKVISION,
+                    deviceName = "Cámara Hikvision ($ip)",
+                    openPorts = openPorts,
+                    rtspPort = 554,
+                    httpPort = 80,
+                    onvifPort = 80,
+                    onvifServiceUrl = onvifServiceUrl,
+                    suggestedMainPath = "/Streaming/Channels/101",
+                    suggestedSubPath = "/Streaming/Channels/102",
+                    macOrHardwareInfo = "Hikvision / RTSP • Puertos: ${openPorts.joinToString(", ")}"
                 )
             }
 
@@ -529,7 +545,7 @@ object NetworkCameraScanner {
                     detectedBrand = CameraBrand.ONVIF_GENERIC,
                     deviceName = "Cámara ONVIF ($ip)",
                     openPorts = openPorts,
-                    rtspPort = if (openPorts.contains(554)) 554 else 8554,
+                    rtspPort = if (openPorts.contains(554)) 554 else if (openPorts.contains(8554)) 8554 else 0,
                     httpPort = 80,
                     onvifPort = 8899,
                     onvifServiceUrl = onvifServiceUrl,
@@ -545,7 +561,7 @@ object NetworkCameraScanner {
                     detectedBrand = CameraBrand.ESP32_CAM,
                     deviceName = "Cámara MJPEG / Eye4 HTTP ($ip)",
                     openPorts = openPorts,
-                    rtspPort = 554,
+                    rtspPort = 0,
                     httpPort = 81,
                     onvifPort = 80,
                     onvifServiceUrl = onvifServiceUrl,
@@ -561,30 +577,42 @@ object NetworkCameraScanner {
                     detectedBrand = CameraBrand.V720_NAXCLOW,
                     deviceName = "Cámara V720 / IP Webcam ($ip)",
                     openPorts = openPorts,
-                    rtspPort = 554,
+                    rtspPort = 0,
                     httpPort = 8080,
                     onvifPort = 8080,
                     onvifServiceUrl = onvifServiceUrl,
                     suggestedMainPath = "/video",
-                    suggestedSubPath = "/video",
-                    macOrHardwareInfo = "HTTP Video Puerto 8080"
+                    suggestedSubPath = "/stream",
+                    macOrHardwareInfo = "V720 / HTTP Video Puerto 8080"
                 )
             }
 
             else -> {
-                val rtsp = if (openPorts.contains(8554) && !openPorts.contains(554)) 8554 else 554
+                val hasRtsp = openPorts.contains(554) || openPorts.contains(8554)
+                val rtsp = if (openPorts.contains(554)) 554 else if (openPorts.contains(8554)) 8554 else 0
+                val primaryHttp = openPorts.firstOrNull { it in listOf(80, 8080, 81, 8088, 7070, 8000, 5000) } ?: 80
+                val brand = if (hasRtsp) {
+                    if (onvifServiceUrl != null) CameraBrand.ONVIF_GENERIC else CameraBrand.CUSTOM_RTSP
+                } else {
+                    CameraBrand.CUSTOM_RTSP
+                }
+                val name = if (hasRtsp) {
+                    if (onvifServiceUrl != null) "Cámara ONVIF ($ip)" else "Cámara RTSP ($ip)"
+                } else {
+                    "Cámara Video / HTTP ($ip)"
+                }
                 DiscoveredCameraDevice(
                     ipAddress = ip,
-                    detectedBrand = if (onvifServiceUrl != null) CameraBrand.ONVIF_GENERIC else CameraBrand.CUSTOM_RTSP,
-                    deviceName = if (onvifServiceUrl != null) "Cámara ONVIF ($ip)" else "Cámara RTSP ($ip)",
+                    detectedBrand = brand,
+                    deviceName = name,
                     openPorts = openPorts,
                     rtspPort = rtsp,
-                    httpPort = 80,
-                    onvifPort = 80,
+                    httpPort = primaryHttp,
+                    onvifPort = if (hasRtsp) 80 else primaryHttp,
                     onvifServiceUrl = onvifServiceUrl,
-                    suggestedMainPath = if (onvifServiceUrl != null) "/live/ch00_1" else "/live/ch0",
-                    suggestedSubPath = if (onvifServiceUrl != null) "/live/ch00_0" else "/live/ch0",
-                    macOrHardwareInfo = "Puertos abiertos: ${openPorts.joinToString(", ")}"
+                    suggestedMainPath = if (hasRtsp) "/live/ch0" else "/video",
+                    suggestedSubPath = if (hasRtsp) "/live/ch1" else "/stream",
+                    macOrHardwareInfo = "Puertos: ${openPorts.joinToString(", ")}"
                 )
             }
         }

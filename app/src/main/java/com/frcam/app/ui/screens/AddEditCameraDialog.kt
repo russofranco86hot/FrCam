@@ -81,6 +81,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -198,6 +199,9 @@ fun AddEditCameraSheet(
     var motionDetectionEnabled by remember {
         mutableStateOf(initialCamera?.motionDetectionEnabled ?: true)
     }
+    var groupName by remember {
+        mutableStateOf(initialCamera?.groupName ?: "Casa")
+    }
     var showV380IniDialog by remember { mutableStateOf(false) }
 
     fun buildCurrentConfig(): CameraConfig {
@@ -233,7 +237,8 @@ fun AddEditCameraSheet(
             ptzType = ptzType,
             invertPan = invertPan,
             invertTilt = invertTilt,
-            motionDetectionEnabled = motionDetectionEnabled
+            motionDetectionEnabled = motionDetectionEnabled,
+            groupName = groupName.trim().ifBlank { "Casa" }
         )
     }
 
@@ -389,6 +394,30 @@ fun AddEditCameraSheet(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = groupName,
+                onValueChange = { groupName = it },
+                label = { Text("Grupo o Sector (ej. Casa, Entrada, Patio, Oficina)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+            ) {
+                listOf("Casa", "Entrada", "Patio", "Oficina", "Garage", "Fondo").forEach { presetGroup ->
+                    FilterChip(
+                        selected = groupName.equals(presetGroup, ignoreCase = true),
+                        onClick = { groupName = presetGroup },
+                        label = { Text(presetGroup, fontSize = 11.sp) }
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -958,6 +987,8 @@ fun LanDiscoveryDialog(
     discoveredDevices: List<DiscoveredCameraDevice>,
     onStartScan: () -> Unit,
     onSelectDevice: (DiscoveredCameraDevice) -> Unit,
+    existingCameraIps: Set<String> = emptySet(),
+    onAddDiscoveredCameras: (List<DiscoveredCameraDevice>, String) -> Unit = { _, _ -> },
     waitingCameraAps: List<WaitingCameraAp> = emptyList(),
     isScanningWaiting: Boolean = false,
     isProvisioning: Boolean = false,
@@ -974,6 +1005,11 @@ fun LanDiscoveryDialog(
     var selectedTab by remember { mutableIntStateOf(0) }
     var pairingMethod by remember { mutableIntStateOf(0) }
     var selectedQrFormat by remember { mutableStateOf(QrWifiFormat.UNIVERSAL_WIFI) }
+
+    var selectedTargetGroup by remember { mutableStateOf("Casa") }
+    var localAddedIps by remember { mutableStateOf(setOf<String>()) }
+    var isMultiSelectMode by remember { mutableStateOf(false) }
+    var selectedForBatch by remember { mutableStateOf(setOf<String>()) }
 
     // Estados para el aprovisionamiento de cámara nueva a Wi-Fi de casa
     val (savedWifiSsid, savedWifiPass) = remember { CameraProvisioningEngine.getSavedWifiCredentials(context) }
@@ -1184,16 +1220,101 @@ fun LanDiscoveryDialog(
                             }
                         }
                     } else {
+                        // Grupo selector para las cámaras a agregar
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Grupo a asignar:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF38BDF8)
+                            )
+                        }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            listOf("Casa", "Entrada", "Patio", "Oficina", "Garage", "Fondo").forEach { grp ->
+                                FilterChip(
+                                    selected = selectedTargetGroup.equals(grp, ignoreCase = true),
+                                    onClick = { selectedTargetGroup = grp },
+                                    label = { Text(grp, fontSize = 11.sp) }
+                                )
+                            }
+                        }
+
+                        // Barra de acción: Agregar Todas y Elegir Varias
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = {
+                                    val toAdd = discoveredDevices.filter { dev ->
+                                        !existingCameraIps.contains(dev.ipAddress) && !localAddedIps.contains(dev.ipAddress)
+                                    }.ifEmpty { discoveredDevices }
+                                    onAddDiscoveredCameras(toAdd, selectedTargetGroup)
+                                    localAddedIps = localAddedIps + toAdd.map { it.ipAddress }
+                                    Toast.makeText(context, "Se agregaron ${toAdd.size} cámara(s) a '$selectedTargetGroup'", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                                modifier = Modifier.weight(1.3f)
+                            ) {
+                                Icon(Icons.Default.AddCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Agregar Todas (${discoveredDevices.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (isMultiSelectMode) {
+                                        val toAdd = discoveredDevices.filter { selectedForBatch.contains(it.ipAddress) }
+                                        if (toAdd.isNotEmpty()) {
+                                            onAddDiscoveredCameras(toAdd, selectedTargetGroup)
+                                            localAddedIps = localAddedIps + toAdd.map { it.ipAddress }
+                                            Toast.makeText(context, "Se agregaron ${toAdd.size} cámara(s) a '$selectedTargetGroup'", Toast.LENGTH_SHORT).show()
+                                            selectedForBatch = emptySet()
+                                            isMultiSelectMode = false
+                                        } else {
+                                            isMultiSelectMode = false
+                                        }
+                                    } else {
+                                        isMultiSelectMode = true
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    if (isMultiSelectMode) "Guardar (${selectedForBatch.size})" else "Elegir Varias",
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             discoveredDevices.forEach { dev ->
+                                val isAdded = existingCameraIps.contains(dev.ipAddress) || localAddedIps.contains(dev.ipAddress)
+                                val isSelected = selectedForBatch.contains(dev.ipAddress)
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { onSelectDevice(dev) },
-                                    colors = CardDefaults.cardColors(containerColor = FrColors.cardHigh),
+                                        .clickable {
+                                            if (isMultiSelectMode) {
+                                                selectedForBatch = if (isSelected) selectedForBatch - dev.ipAddress else selectedForBatch + dev.ipAddress
+                                            } else {
+                                                onSelectDevice(dev)
+                                            }
+                                        },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isSelected) Color(0xFF0F3A50) else FrColors.cardHigh
+                                    ),
                                     shape = RoundedCornerShape(10.dp)
                                 ) {
                                     Row(
@@ -1203,6 +1324,15 @@ fun LanDiscoveryDialog(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
+                                        if (isMultiSelectMode) {
+                                            Checkbox(
+                                                checked = isSelected,
+                                                onCheckedChange = { checked ->
+                                                    selectedForBatch = if (checked) selectedForBatch + dev.ipAddress else selectedForBatch - dev.ipAddress
+                                                }
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
                                             modifier = Modifier.weight(1f)
@@ -1210,7 +1340,7 @@ fun LanDiscoveryDialog(
                                             Icon(
                                                 imageVector = Icons.Default.Router,
                                                 contentDescription = null,
-                                                tint = Color(0xFF38BDF8),
+                                                tint = if (isAdded) Color(0xFF10B981) else Color(0xFF38BDF8),
                                                 modifier = Modifier.size(22.dp)
                                             )
                                             Spacer(modifier = Modifier.width(10.dp))
@@ -1228,13 +1358,58 @@ fun LanDiscoveryDialog(
                                                 )
                                             }
                                         }
-                                        Icon(
-                                            imageVector = Icons.Default.AddCircleOutline,
-                                            contentDescription = "Agregar",
-                                            tint = Color(0xFF34D399)
-                                        )
+                                        if (isAdded) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .background(Color(0xFF065F46), RoundedCornerShape(6.dp))
+                                                    .padding(horizontal = 7.dp, vertical = 3.dp)
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.CheckCircle,
+                                                        contentDescription = null,
+                                                        tint = Color(0xFF34D399),
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(3.dp))
+                                                    Text(
+                                                        text = "Agregada",
+                                                        color = Color(0xFF34D399),
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        } else if (!isMultiSelectMode) {
+                                            IconButton(
+                                                onClick = {
+                                                    onAddDiscoveredCameras(listOf(dev), selectedTargetGroup)
+                                                    localAddedIps = localAddedIps + dev.ipAddress
+                                                    Toast.makeText(context, "${dev.deviceName} agregada a '$selectedTargetGroup'", Toast.LENGTH_SHORT).show()
+                                                }
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.AddCircleOutline,
+                                                    contentDescription = "Agregar",
+                                                    tint = Color(0xFF34D399),
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
+                            }
+                        }
+
+                        if (localAddedIps.isNotEmpty()) {
+                            Button(
+                                onClick = onDismiss,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp)
+                            ) {
+                                Text("Ir a Mis Cámaras (${localAddedIps.size} agregadas)", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -1892,7 +2067,7 @@ fun LanDiscoveryDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cerrar")
+                Text(if (localAddedIps.isNotEmpty()) "Listo (Ir a Cámaras)" else "Cerrar")
             }
         }
     )

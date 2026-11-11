@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -38,12 +39,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -58,6 +66,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -149,9 +158,75 @@ fun UniversalCameraPlayer(
     enablePinchZoom: Boolean = true,
     frameCaptureHandle: CameraFrameCaptureHandle? = null,
     onResolutionChanged: ((String) -> Unit)? = null,
+    onUpdateCamera: ((CameraConfig) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    var showAuthDialog by remember { mutableStateOf(false) }
+    var authUser by remember(camera.id, camera.username) { mutableStateOf(camera.username.ifBlank { "admin" }) }
+    var authPass by remember(camera.id, camera.password) { mutableStateOf(camera.password) }
+
+    if (showAuthDialog) {
+        AlertDialog(
+            onDismissRequest = { showAuthDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = Color(0xFFF59E0B),
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Credenciales de Cámara", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "La cámara \"${camera.name}\" (${camera.host}) requiere autenticación para transmitir video.",
+                        fontSize = 12.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    OutlinedTextField(
+                        value = authUser,
+                        onValueChange = { authUser = it },
+                        label = { Text("Usuario (ej. admin)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = authPass,
+                        onValueChange = { authPass = it },
+                        label = { Text("Contraseña") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAuthDialog = false
+                        val updated = camera.copy(
+                            username = authUser.trim(),
+                            password = authPass
+                        )
+                        onUpdateCamera?.invoke(updated)
+                    }
+                ) {
+                    Text("Guardar y Conectar")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showAuthDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
     val internalHandle = remember(camera.id) { frameCaptureHandle ?: CameraFrameCaptureHandle() }
     LaunchedEffect(frameCaptureHandle, internalHandle) {
         if (frameCaptureHandle != null && frameCaptureHandle !== internalHandle) {
@@ -369,6 +444,7 @@ fun UniversalCameraPlayer(
                     captureHandle = internalHandle,
                     onResolution = { res -> onResolutionChanged?.invoke(res) },
                     onManualRetry = { retryCounter++ },
+                    onOpenAuth = { showAuthDialog = true },
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer(
@@ -396,6 +472,7 @@ fun UniversalCameraPlayer(
                         candidateIndex = 0
                         retryCounter++
                     },
+                    onOpenAuth = { showAuthDialog = true },
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer(
@@ -423,6 +500,7 @@ fun UniversalCameraPlayer(
                         candidateIndex = 0
                         retryCounter++
                     },
+                    onOpenAuth = { showAuthDialog = true },
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer(
@@ -953,6 +1031,7 @@ private fun ExoRtspStreamSurface(
     onResolution: (String) -> Unit,
     onErrorNextCandidate: () -> Unit,
     onManualRetry: () -> Unit,
+    onOpenAuth: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1007,7 +1086,9 @@ private fun ExoRtspStreamSurface(
 
             override fun onPlayerError(error: PlaybackException) {
                 streamState = StreamState.ERROR
-                errorMessage = error.localizedMessage ?: "Error RTSP (${error.errorCodeName})"
+                val detail = error.localizedMessage ?: "Error RTSP (${error.errorCodeName})"
+                val isAuth = detail.contains("401", ignoreCase = true) || detail.contains("Unauthorized", ignoreCase = true) || detail.contains("Auth", ignoreCase = true)
+                errorMessage = if (isAuth) "Error 401: Contraseña incorrecta o requerida" else detail
                 onErrorNextCandidate()
             }
         }
@@ -1063,7 +1144,8 @@ private fun ExoRtspStreamSurface(
             streamState = streamState,
             streamUrl = streamUrl,
             errorMessage = errorMessage,
-            onRetry = onManualRetry
+            onRetry = onManualRetry,
+            onOpenAuth = onOpenAuth
         )
     }
 }
@@ -1078,6 +1160,7 @@ private fun MjpegStreamSurface(
     onResolution: (String) -> Unit,
     onErrorNextCandidate: () -> Unit,
     onManualRetry: () -> Unit,
+    onOpenAuth: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var currentFrame by remember(streamUrl, retryKey) { mutableStateOf<Bitmap?>(null) }
@@ -1100,6 +1183,9 @@ private fun MjpegStreamSurface(
                 }
                 conn.connect()
                 if (conn.responseCode !in 200..299) {
+                    if (conn.responseCode == 401) {
+                        throw Exception("Error 401: Requiere contraseña")
+                    }
                     throw Exception("HTTP ${conn.responseCode}")
                 }
 
@@ -1163,7 +1249,8 @@ private fun MjpegStreamSurface(
             streamState = streamState,
             streamUrl = streamUrl,
             errorMessage = errorMessage,
-            onRetry = onManualRetry
+            onRetry = onManualRetry,
+            onOpenAuth = onOpenAuth
         )
     }
 }
@@ -1175,6 +1262,7 @@ private fun V720HardwareStreamSurface(
     captureHandle: CameraFrameCaptureHandle,
     onResolution: (String) -> Unit,
     onManualRetry: () -> Unit,
+    onOpenAuth: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var streamState by remember(camera.id, retryKey) { mutableStateOf(StreamState.CONNECTING) }
@@ -1219,7 +1307,8 @@ private fun V720HardwareStreamSurface(
             streamState = streamState,
             streamUrl = "V720 (${camera.host.ifBlank { camera.deviceId }})",
             errorMessage = errorMessage,
-            onRetry = onManualRetry
+            onRetry = onManualRetry,
+            onOpenAuth = onOpenAuth
         )
     }
 }
@@ -1229,7 +1318,8 @@ private fun StreamOverlayState(
     streamState: StreamState,
     streamUrl: String,
     errorMessage: String,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    onOpenAuth: (() -> Unit)? = null
 ) {
     val sanitizedUrl = remember(streamUrl) {
         streamUrl.replace(Regex("://([^:]+):([^@]+)@"), "://$1:***@")
@@ -1297,17 +1387,40 @@ private fun StreamOverlayState(
                         )
                     }
                     Spacer(modifier = Modifier.height(6.dp))
-                    FilledTonalButton(
-                        onClick = onRetry,
-                        modifier = Modifier.height(30.dp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Reintentar", fontSize = 11.sp)
+                        FilledTonalButton(
+                            onClick = onRetry,
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Reintentar", fontSize = 11.sp)
+                        }
+                        if (onOpenAuth != null) {
+                            FilledTonalButton(
+                                onClick = onOpenAuth,
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = Color(0xFFF59E0B),
+                                    contentColor = Color.Black
+                                ),
+                                modifier = Modifier.height(30.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Key,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Clave", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
