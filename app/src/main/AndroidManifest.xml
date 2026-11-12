@@ -69,6 +69,20 @@
             android:foregroundServiceType="connectedDevice"
             android:exported="false" />
 
+        <service
+            android:name="com.frcam.app.service.CameraSurveillanceService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
+
+        <receiver
+            android:name="com.frcam.app.receiver.MotionActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.frcam.app.ACTION_SNOOZE_30M" />
+                <action android:name="com.frcam.app.ACTION_DISMISS" />
+            </intent-filter>
+        </receiver>
+
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
             android:value="label,ica" />

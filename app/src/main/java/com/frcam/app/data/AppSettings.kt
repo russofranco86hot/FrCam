@@ -92,6 +92,24 @@ object AppSettings {
     var aiFilterOnlySmart by mutableStateOf(false)
         private set
 
+    // Respaldo Automático a Telegram
+    var telegramEnabled by mutableStateOf(false)
+        private set
+    var telegramBotToken by mutableStateOf("")
+        private set
+    var telegramChatId by mutableStateOf("")
+        private set
+
+    // Vigilancia en Segundo Plano (con la app cerrada)
+    var backgroundSurveillanceEnabled by mutableStateOf(true)
+        private set
+    var surveillanceScheduleEnabled by mutableStateOf(false)
+        private set
+    var surveillanceStartMinutes by mutableIntStateOf(22 * 60)
+        private set
+    var surveillanceEndMinutes by mutableIntStateOf(7 * 60)
+        private set
+
     fun init(context: Context) {
         if (::prefs.isInitialized) return
         prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -103,6 +121,56 @@ object AppSettings {
         motionSensitivity = MotionSensitivity.fromId(prefs.getString("motion_sensitivity", "medium"))
         aiDetectionEnabled = prefs.getBoolean("ai_detection_enabled", true)
         aiFilterOnlySmart = prefs.getBoolean("ai_filter_smart_only", false)
+
+        telegramEnabled = prefs.getBoolean("telegram_enabled", false)
+        telegramBotToken = prefs.getString("telegram_bot_token", "").orEmpty()
+        telegramChatId = prefs.getString("telegram_chat_id", "").orEmpty()
+
+        backgroundSurveillanceEnabled = prefs.getBoolean("bg_surveillance_enabled", true)
+        surveillanceScheduleEnabled = prefs.getBoolean("surv_schedule_enabled", false)
+        surveillanceStartMinutes = prefs.getInt("surv_schedule_start", 22 * 60)
+        surveillanceEndMinutes = prefs.getInt("surv_schedule_end", 7 * 60)
+    }
+
+    fun updateTelegramSettings(enabled: Boolean, botToken: String, chatId: String) {
+        telegramEnabled = enabled
+        telegramBotToken = botToken.trim()
+        telegramChatId = chatId.trim()
+        prefs.edit()
+            .putBoolean("telegram_enabled", enabled)
+            .putString("telegram_bot_token", telegramBotToken)
+            .putString("telegram_chat_id", telegramChatId)
+            .apply()
+    }
+
+    fun updateBackgroundSurveillance(enabled: Boolean) {
+        backgroundSurveillanceEnabled = enabled
+        prefs.edit().putBoolean("bg_surveillance_enabled", enabled).apply()
+    }
+
+    fun updateSurveillanceSchedule(enabled: Boolean, startMinutes: Int, endMinutes: Int) {
+        surveillanceScheduleEnabled = enabled
+        surveillanceStartMinutes = startMinutes.coerceIn(0, 1439)
+        surveillanceEndMinutes = endMinutes.coerceIn(0, 1439)
+        prefs.edit()
+            .putBoolean("surv_schedule_enabled", enabled)
+            .putInt("surv_schedule_start", surveillanceStartMinutes)
+            .putInt("surv_schedule_end", surveillanceEndMinutes)
+            .apply()
+    }
+
+    /** ¿La hora actual cae dentro del horario de vigilancia programado? */
+    fun isInsideSurveillanceSchedule(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        if (!surveillanceScheduleEnabled) return true // Vigilancia 24/7 si no hay horario
+        val cal = Calendar.getInstance().apply { timeInMillis = nowMillis }
+        val now = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        val start = surveillanceStartMinutes
+        val end = surveillanceEndMinutes
+        return when {
+            start == end -> true
+            start < end -> now in start until end
+            else -> now >= start || now < end
+        }
     }
 
     fun updateAmoled(value: Boolean) {

@@ -15,8 +15,8 @@ android {
         applicationId = "com.frcam.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "1.3.3"
+        versionCode = 30
+        versionName = "1.3.4"
 
         vectorDrawables.useSupportLibrary = true
     }

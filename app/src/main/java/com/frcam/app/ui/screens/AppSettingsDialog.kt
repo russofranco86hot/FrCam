@@ -19,11 +19,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.frcam.app.BuildConfig
+import com.frcam.app.backup.TelegramBackupEngine
 import com.frcam.app.data.AppSettings
 import com.frcam.app.data.MotionSensitivity
 import com.frcam.app.model.CameraConfig
+import com.frcam.app.service.CameraSurveillanceService
 import com.frcam.app.ui.theme.FrColors
 import com.frcam.app.wear.PhoneWearSyncEngine
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -32,6 +35,7 @@ fun AppSettingsDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var amoled by remember { mutableStateOf(AppSettings.amoled) }
     var motionSeconds by remember { mutableIntStateOf(AppSettings.motionClipSeconds) }
     var startMinutes by remember { mutableIntStateOf(AppSettings.scheduleStartMinutes) }
@@ -40,6 +44,16 @@ fun AppSettingsDialog(
     var sensitivity by remember { mutableStateOf(AppSettings.motionSensitivity) }
     var aiEnabled by remember { mutableStateOf(AppSettings.aiDetectionEnabled) }
     var aiFilterSmart by remember { mutableStateOf(AppSettings.aiFilterOnlySmart) }
+
+    var telegramEnabled by remember { mutableStateOf(AppSettings.telegramEnabled) }
+    var telegramToken by remember { mutableStateOf(AppSettings.telegramBotToken) }
+    var telegramChatId by remember { mutableStateOf(AppSettings.telegramChatId) }
+    var isTestingTelegram by remember { mutableStateOf(false) }
+
+    var bgSurveillance by remember { mutableStateOf(AppSettings.backgroundSurveillanceEnabled) }
+    var survScheduleEnabled by remember { mutableStateOf(AppSettings.surveillanceScheduleEnabled) }
+    var survStartMinutes by remember { mutableIntStateOf(AppSettings.surveillanceStartMinutes) }
+    var survEndMinutes by remember { mutableIntStateOf(AppSettings.surveillanceEndMinutes) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -375,6 +389,187 @@ fun AppSettingsDialog(
                                     },
                                     label = { Text("${min} min", fontSize = 10.sp) }
                                 )
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // SECCIÓN VIGILANCIA EN SEGUNDO PLANO
+                Text(
+                    text = "Vigilancia en Segundo Plano (App Cerrada)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = Color(0xFF38BDF8)
+                )
+
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = FrColors.card),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    text = "Vigilar con pantalla apagada o app cerrada",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "Mantiene activo el servicio de protección para detectar movimiento, emitir alertas push con GIF animado y respaldar a Telegram.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = bgSurveillance,
+                                onCheckedChange = {
+                                    bgSurveillance = it
+                                    AppSettings.updateBackgroundSurveillance(it)
+                                    if (it) {
+                                        CameraSurveillanceService.startOrUpdate(context)
+                                    } else {
+                                        CameraSurveillanceService.stop(context)
+                                    }
+                                }
+                            )
+                        }
+
+                        HorizontalDivider(color = Color(0xFF334155))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    text = "Programar Horario de Vigilancia",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = if (survScheduleEnabled) "Vigilar solo de ${AppSettings.formatMinutes(survStartMinutes)} a ${AppSettings.formatMinutes(survEndMinutes)} hs." else "Vigilancia continua las 24 horas del día.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = survScheduleEnabled,
+                                onCheckedChange = {
+                                    survScheduleEnabled = it
+                                    AppSettings.updateSurveillanceSchedule(it, survStartMinutes, survEndMinutes)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // SECCIÓN RESPALDO A TELEGRAM
+                Text(
+                    text = "Respaldo Automático a Telegram",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = Color(0xFF38BDF8)
+                )
+
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = FrColors.card),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    text = "Enviar clips GIF a Telegram",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "Cada vez que se detecte movimiento, el clip animado se enviará inmediatamente a tu chat o canal privado de Telegram.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = telegramEnabled,
+                                onCheckedChange = {
+                                    telegramEnabled = it
+                                    AppSettings.updateTelegramSettings(it, telegramToken, telegramChatId)
+                                }
+                            )
+                        }
+
+                        OutlinedTextField(
+                            value = telegramToken,
+                            onValueChange = {
+                                telegramToken = it
+                                AppSettings.updateTelegramSettings(telegramEnabled, it, telegramChatId)
+                            },
+                            label = { Text("Token de Bot de Telegram") },
+                            placeholder = { Text("123456789:ABCdefGHIjklMNOpqrSTUvwxyz") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        OutlinedTextField(
+                            value = telegramChatId,
+                            onValueChange = {
+                                telegramChatId = it
+                                AppSettings.updateTelegramSettings(telegramEnabled, telegramToken, it)
+                            },
+                            label = { Text("Chat ID de Telegram") },
+                            placeholder = { Text("Ej. 987654321 o -100123456789") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Text(
+                            text = "💡 Para obtener tu Bot Token habla con @BotFather en Telegram. Para conocer tu Chat ID envía un mensaje a @userinfobot.",
+                            fontSize = 10.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+
+                        FilledTonalButton(
+                            onClick = {
+                                if (telegramToken.isBlank() || telegramChatId.isBlank()) {
+                                    Toast.makeText(context, "Ingresa primero el Token y el Chat ID", Toast.LENGTH_SHORT).show()
+                                    return@FilledTonalButton
+                                }
+                                isTestingTelegram = true
+                                coroutineScope.launch {
+                                    val result = TelegramBackupEngine.sendTestMessage(telegramToken, telegramChatId)
+                                    isTestingTelegram = false
+                                    result.onSuccess { msg ->
+                                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                    }.onFailure { err ->
+                                        Toast.makeText(context, err.message ?: "Error al conectar con Telegram", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            },
+                            enabled = !isTestingTelegram,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF0284C7).copy(alpha = 0.25f), contentColor = Color(0xFF38BDF8))
+                        ) {
+                            if (isTestingTelegram) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Probando conexión...")
+                            } else {
+                                Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Probar Conexión con Telegram")
                             }
                         }
                     }

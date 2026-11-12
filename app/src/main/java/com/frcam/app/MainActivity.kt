@@ -113,6 +113,12 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val cameras by viewModel.cameras.collectAsState()
+
+                LaunchedEffect(cameras, AppSettings.backgroundSurveillanceEnabled) {
+                    if (AppSettings.backgroundSurveillanceEnabled && cameras.any { it.motionDetectionEnabled }) {
+                        com.frcam.app.service.CameraSurveillanceService.startOrUpdate(this@MainActivity)
+                    }
+                }
                 val gridMode by viewModel.gridMode.collectAsState()
                 val selectedCameraId by viewModel.selectedCameraId.collectAsState()
                 val isScanningLan by viewModel.isScanningLan.collectAsState()
@@ -309,6 +315,9 @@ class MainActivity : ComponentActivity() {
                         },
                         onToggleMotion = { cam, enabled ->
                             viewModel.toggleMotionDetection(cam.id, enabled)
+                            if (enabled && AppSettings.backgroundSurveillanceEnabled) {
+                                com.frcam.app.service.CameraSurveillanceService.startOrUpdate(this@MainActivity)
+                            }
                         },
                         onExportCameras = { ctx, uri, callback ->
                             viewModel.exportCamerasToUri(ctx, uri, callback)

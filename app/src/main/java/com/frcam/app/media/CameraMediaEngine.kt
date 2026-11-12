@@ -316,8 +316,60 @@ object CameraMediaEngine {
             builder.addAction(android.R.drawable.ic_menu_gallery, "Ver GIF", viewPending)
         }
 
+        val notifId = cameraId.hashCode() xor Random.Default.nextInt(1, 9999)
+
+        // Acción 1: Abrir la cámara directamente en vivo
+        builder.addAction(
+            android.R.drawable.ic_media_play,
+            "Ver en Vivo",
+            pendingIntent
+        )
+
+        // Acción 2: Silenciar alertas de esta cámara por 30 minutos
+        val snoozeIntent = Intent(context, com.frcam.app.receiver.MotionActionReceiver::class.java).apply {
+            action = com.frcam.app.receiver.MotionActionReceiver.ACTION_SNOOZE_30M
+            putExtra(com.frcam.app.receiver.MotionActionReceiver.EXTRA_CAMERA_ID, cameraId)
+            putExtra(com.frcam.app.receiver.MotionActionReceiver.EXTRA_CAMERA_NAME, cameraName)
+            putExtra(com.frcam.app.receiver.MotionActionReceiver.EXTRA_NOTIFICATION_ID, notifId)
+        }
+        val snoozePending = PendingIntent.getBroadcast(
+            context,
+            cameraId.hashCode() + 101,
+            snoozeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        builder.addAction(
+            android.R.drawable.ic_lock_silent_mode,
+            "Silenciar 30m",
+            snoozePending
+        )
+
         NotificationManagerCompat.from(context)
-            .notify(cameraId.hashCode() xor Random.Default.nextInt(1, 9999), builder.build())
+            .notify(notifId, builder.build())
+
+        // Respaldo Automático a Telegram si está configurado
+        if (AppSettings.telegramEnabled && AppSettings.telegramBotToken.isNotBlank() && AppSettings.telegramChatId.isNotBlank()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                com.frcam.app.backup.TelegramBackupEngine.sendMotionAlert(
+                    botToken = AppSettings.telegramBotToken,
+                    chatId = AppSettings.telegramChatId,
+                    cameraName = cameraName,
+                    gifFile = gifFile,
+                    snapshot = stampedBitmap,
+                    aiLabel = aiBadge,
+                    timestampStr = timeStr
+                )
+            }
+        }
+
+        // Aviso en la muñeca al reloj Wear OS
+        com.frcam.app.wear.PhoneWearSyncEngine.notifyMotionEventToWatch(
+            context = context,
+            cameraName = cameraName,
+            timeStr = timeStr,
+            aiLabel = aiBadge,
+            motionScore = motionPercent
+        )
     }
 
     private fun pickEvenly(frames: List<Bitmap>, count: Int): List<Bitmap> {

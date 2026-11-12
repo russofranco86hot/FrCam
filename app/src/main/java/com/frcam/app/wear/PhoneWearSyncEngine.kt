@@ -491,4 +491,37 @@ object PhoneWearSyncEngine {
     fun unregisterListener(context: Context, listener: MessageClient.OnMessageReceivedListener) {
         Wearable.getMessageClient(context).removeListener(listener)
     }
+
+    /**
+     * Envía un aviso de movimiento inmediato hacia el reloj Wear OS conectado
+     * para que vibre en la muñeca y alerte al usuario.
+     */
+    fun notifyMotionEventToWatch(
+        context: Context,
+        cameraName: String,
+        timeStr: String,
+        aiLabel: String?,
+        motionScore: Float
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val nodeClient = Wearable.getNodeClient(context)
+                val nodes = nodeClient.connectedNodes.await()
+                if (nodes.isEmpty()) return@launch
+
+                val alertJson = org.json.JSONObject().apply {
+                    put("camera_name", cameraName)
+                    put("time", timeStr)
+                    put("ai_label", aiLabel ?: "")
+                    put("score", motionScore.toInt())
+                }.toString()
+
+                val bytes = alertJson.toByteArray(Charsets.UTF_8)
+                val messageClient = Wearable.getMessageClient(context)
+                for (node in nodes) {
+                    messageClient.sendMessage(node.id, "/frcam/motion_alert", bytes)
+                }
+            } catch (_: Exception) {}
+        }
+    }
 }
