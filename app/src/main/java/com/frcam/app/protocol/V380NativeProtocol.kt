@@ -1,7 +1,17 @@
 package com.frcam.app.protocol
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
+import android.media.MediaCodec
+import android.media.MediaFormat
+import android.os.Environment
+import android.util.Log
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.model.CameraDeviceInfo
+import com.frcam.app.model.CameraRecordingEvent
 import com.frcam.app.model.WifiNetworkScanResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +19,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
@@ -120,6 +131,7 @@ data class V380AuthCheckResult(
 
 object V380NativeProtocol {
 
+    private const val TAG = "V380NativeProtocol"
     private const val DISPATCH_URL = "http://dispa1.av380.net:8001/api/v1/get_stream_server"
     private val activeStreamOutputs = ConcurrentHashMap<String, OutputStream>()
 
@@ -285,6 +297,392 @@ object V380NativeProtocol {
             } catch (_: Exception) {}
         }
         Result.success("Tarjeta MicroSD formateada correctamente en la cámara")
+    }
+
+    /**
+     * Consulta las grabaciones y eventos de movimiento almacenados en la tarjeta MicroSD / memoria de la cámara V380.
+     * Combina los eventos remotos de la cámara con los clips locales almacenados en el teléfono para brindar
+     * una línea de tiempo completa y unificada.
+     */
+    suspend fun searchRecordedFiles(
+        camera: CameraConfig,
+        startTimeSec: Long = (System.currentTimeMillis() / 1000L) - 86400L * 2, // Últimas 48 horas por defecto
+        endTimeSec: Long = (System.currentTimeMillis() / 1000L) + 60L,
+        alarmOnly: Boolean = false
+    ): List<CameraRecordingEvent> = withContext(Dispatchers.IO) {
+        val resultList = mutableListOf<CameraRecordingEvent>()
+        val devId = camera.deviceId.toLongOrNull() ?: 0L
+
+        val candidates = mutableListOf<Pair<String, Boolean>>()
+        if (camera.host.isNotBlank() && camera.host != "0.0.0.0") {
+            candidates.add(camera.host to false)
+        }
+        if (devId > 0L) {
+            val cloudIps = resolveCloudRelayServers(devId)
+            for (cip in cloudIps) candidates.add(cip to true)
+        }
+
+        val port = if (camera.rtspPort > 0) camera.rtspPort else 8800
+        val username = camera.username.ifBlank { "admin" }
+        val password = camera.password
+
+        // 1. Consultar a la cámara V380 mediante el comando NV_IPC_SEARCH_REC_FILE_REQUEST (0x1010)
+        for ((ip, isCloud) in candidates) {
+            val targetPort = if (isCloud) 8800 else port
+            try {
+                var authTicket = 0L
+                Socket().use { authSocket ->
+                    authSocket.soTimeout = 4000
+                    authSocket.connect(InetSocketAddress(ip, targetPort), 3000)
+                    val out = authSocket.getOutputStream()
+                    val input = authSocket.getInputStream()
+
+                    val encryptedPassword = generatePassword(password)
+                    val userBytes = username.toByteArray(Charsets.US_ASCII)
+                    val cmd1167 = ByteArray(520)
+                    writeUInt32LE(cmd1167, 0, 1167L)
+                    if (!isCloud) {
+                        writeUInt32LE(cmd1167, 4, 120L)
+                        cmd1167[8] = 31
+                        writeUInt32LE(cmd1167, 9, 1L)
+                        writeUInt32LE(cmd1167, 13, devId)
+                        System.arraycopy(userBytes, 0, cmd1167, 49, min(userBytes.size, 32))
+                        System.arraycopy(encryptedPassword, 0, cmd1167, 81, min(encryptedPassword.size, 64))
+                    } else {
+                        writeUInt32LE(cmd1167, 4, 1022L)
+                        cmd1167[8] = 31
+                        writeUInt32LE(cmd1167, 9, 1L)
+                        writeUInt32LE(cmd1167, 13, devId)
+                        val hostnameBytes = "$devId.nvdvr.net".toByteArray(Charsets.US_ASCII)
+                        System.arraycopy(hostnameBytes, 0, cmd1167, 17, min(hostnameBytes.size, 50))
+                        writeUInt32LE(cmd1167, 67, targetPort.toLong())
+                        System.arraycopy(userBytes, 0, cmd1167, 71, min(userBytes.size, 32))
+                        System.arraycopy(encryptedPassword, 0, cmd1167, 103, min(encryptedPassword.size, 64))
+                    }
+                    out.write(cmd1167)
+                    out.flush()
+
+                    val resp = receiveAtLeast(input, 256, 20)
+                    if (resp != null && readUInt32LE(resp, 0) == 1168L && readUInt32LE(resp, 4) == 1001L) {
+                        authTicket = readUInt32LE(resp, 13)
+                    }
+
+                    if (authTicket > 0L) {
+                        val searchCmd = ByteArray(64)
+                        writeUInt32LE(searchCmd, 0, 0x1010L)
+                        writeUInt32LE(searchCmd, 4, 0L)
+                        writeUInt32LE(searchCmd, 8, if (alarmOnly) 1L else 0L)
+                        writeUInt32LE(searchCmd, 12, startTimeSec)
+                        writeUInt32LE(searchCmd, 16, endTimeSec)
+                        writeUInt32LE(searchCmd, 20, 100L)
+                        out.write(searchCmd)
+                        out.flush()
+
+                        val searchResp = receiveAtLeast(input, 4096, 16)
+                        if (searchResp != null && searchResp.size >= 16) {
+                            val cmdId = readUInt32LE(searchResp, 0)
+                            if (cmdId == 0x1011L || cmdId == 1011L) {
+                                val count = readUInt32LE(searchResp, 8).toInt().coerceIn(0, 100)
+                                var offset = 16
+                                val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                                val sdfTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+
+                                for (i in 0 until count) {
+                                    if (offset + 48 > searchResp.size) break
+                                    val rStart = readUInt32LE(searchResp, offset)
+                                    val rEnd = readUInt32LE(searchResp, offset + 4)
+                                    val rType = searchResp[offset + 8].toInt() and 0xFF
+                                    val rSize = readUInt32LE(searchResp, offset + 12)
+                                    val rawName = String(searchResp, offset + 16, min(32, searchResp.size - (offset + 16))).trim('\u0000', ' ')
+
+                                    val isAlarm = (rType == 1) || rawName.contains("_M", ignoreCase = true) || rawName.contains("alarm", ignoreCase = true)
+                                    if (!alarmOnly || isAlarm) {
+                                        val startMs = if (rStart > 0L) rStart * 1000L else System.currentTimeMillis() - 60000L
+                                        val endMs = if (rEnd > rStart) rEnd * 1000L else startMs + 30000L
+                                        val durSec = ((endMs - startMs) / 1000L).toInt().coerceAtLeast(5)
+
+                                        resultList.add(
+                                            CameraRecordingEvent(
+                                                id = "v380_sd_${camera.id}_${startMs}_$i",
+                                                cameraId = camera.id,
+                                                cameraName = camera.name,
+                                                fileName = rawName.ifBlank { "REC_${sdfDate.format(Date(startMs))}_${sdfTime.format(Date(startMs))}.mp4" },
+                                                startTimeSec = startMs / 1000L,
+                                                endTimeSec = endMs / 1000L,
+                                                durationSeconds = durSec,
+                                                formattedDate = sdfDate.format(Date(startMs)),
+                                                formattedTime = sdfTime.format(Date(startMs)),
+                                                isMotionAlarm = isAlarm,
+                                                eventLabel = if (isAlarm) "🚨 Detección de Movimiento (MicroSD)" else "📹 Grabación Continua",
+                                                sizeBytes = if (rSize > 0L) rSize else (durSec * 120_000L),
+                                                localFilePath = null,
+                                                isCloudEvent = isCloud
+                                            )
+                                        )
+                                    }
+                                    offset += 48
+                                }
+                            }
+                        }
+                    }
+                }
+                if (resultList.isNotEmpty()) break
+            } catch (e: Exception) {
+                Log.d(TAG, "Búsqueda en $ip falló: ${e.message}")
+            }
+        }
+
+        // 2. Integrar clips locales y grabaciones guardadas en el almacenamiento del teléfono
+        try {
+            val moviesDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "FrCam")
+            val picturesDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "FrCam/Movimientos")
+            val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+            val sdfTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+
+            val scanDirs = listOf(moviesDir, picturesDir)
+            for (dir in scanDirs) {
+                if (dir.exists() && dir.isDirectory) {
+                    val files = dir.listFiles() ?: emptyArray()
+                    for (f in files) {
+                        if (!f.isFile || f.length() == 0L) continue
+                        val name = f.name
+                        val cleanCamName = camera.name.replace(" ", "_")
+                        val matchesCamera = name.contains(cleanCamName, ignoreCase = true) ||
+                            name.contains(camera.id, ignoreCase = true) ||
+                            (files.size <= 20)
+
+                        if (matchesCamera) {
+                            val lastMod = f.lastModified()
+                            val isGif = name.endsWith(".gif", ignoreCase = true)
+                            val isAlarm = isGif || name.contains("movimiento", ignoreCase = true) || name.contains("motion", ignoreCase = true)
+                            if (!alarmOnly || isAlarm) {
+                                val dur = if (isGif) 6 else 30
+                                resultList.add(
+                                    CameraRecordingEvent(
+                                        id = "local_${f.absolutePath.hashCode()}",
+                                        cameraId = camera.id,
+                                        cameraName = camera.name,
+                                        fileName = f.name,
+                                        startTimeSec = lastMod / 1000L,
+                                        endTimeSec = (lastMod / 1000L) + dur,
+                                        durationSeconds = dur,
+                                        formattedDate = sdfDate.format(Date(lastMod)),
+                                        formattedTime = sdfTime.format(Date(lastMod)),
+                                        isMotionAlarm = isAlarm,
+                                        eventLabel = if (isGif) "🎞️ Clip GIF de Movimiento (Teléfono)" else if (isAlarm) "🚨 Video Alarma (Teléfono)" else "📹 Video Grabado",
+                                        sizeBytes = f.length(),
+                                        localFilePath = f.absolutePath,
+                                        isCloudEvent = false
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        resultList.sortByDescending { it.startTimeSec }
+        resultList.distinctBy { it.id }
+    }
+
+    /**
+     * Extrae un fotograma instantáneo nativo de la cámara V380 conectando brevemente
+     * al puerto 8800 o relevo en la nube, iniciando el túnel y capturando el primer I-Frame H.264/H.265.
+     */
+    suspend fun fetchNativeSampleFrame(camera: CameraConfig): Bitmap? = withContext(Dispatchers.IO) {
+        val devId = camera.deviceId.toLongOrNull() ?: 0L
+        val candidates = mutableListOf<Pair<String, Boolean>>()
+        if (camera.host.isNotBlank() && camera.host != "0.0.0.0") {
+            candidates.add(camera.host to false)
+        }
+        if (devId > 0L) {
+            val cloudIps = resolveCloudRelayServers(devId)
+            for (cip in cloudIps) candidates.add(cip to true)
+        }
+        if (candidates.isEmpty()) return@withContext null
+
+        val port = if (camera.rtspPort > 0) camera.rtspPort else 8800
+        val username = camera.username.ifBlank { "admin" }
+        val password = camera.password
+
+        for ((ip, isCloud) in candidates) {
+            val targetPort = if (isCloud) 8800 else port
+            try {
+                var authTicket = 0L
+                var deviceVersion = 0
+                Socket().use { authSocket ->
+                    authSocket.soTimeout = 3000
+                    authSocket.connect(InetSocketAddress(ip, targetPort), 2500)
+                    val out = authSocket.getOutputStream()
+                    val input = authSocket.getInputStream()
+
+                    val encryptedPassword = generatePassword(password)
+                    val userBytes = username.toByteArray(Charsets.US_ASCII)
+                    val cmd1167 = ByteArray(520)
+                    writeUInt32LE(cmd1167, 0, 1167L)
+                    if (!isCloud) {
+                        writeUInt32LE(cmd1167, 4, 120L)
+                        cmd1167[8] = 31
+                        writeUInt32LE(cmd1167, 9, 1L)
+                        writeUInt32LE(cmd1167, 13, devId)
+                        System.arraycopy(userBytes, 0, cmd1167, 49, min(userBytes.size, 32))
+                        System.arraycopy(encryptedPassword, 0, cmd1167, 81, min(encryptedPassword.size, 64))
+                    } else {
+                        writeUInt32LE(cmd1167, 4, 1022L)
+                        cmd1167[8] = 31
+                        writeUInt32LE(cmd1167, 9, 1L)
+                        writeUInt32LE(cmd1167, 13, devId)
+                        val hostnameBytes = "$devId.nvdvr.net".toByteArray(Charsets.US_ASCII)
+                        System.arraycopy(hostnameBytes, 0, cmd1167, 17, min(hostnameBytes.size, 50))
+                        writeUInt32LE(cmd1167, 67, targetPort.toLong())
+                        System.arraycopy(userBytes, 0, cmd1167, 71, min(userBytes.size, 32))
+                        System.arraycopy(encryptedPassword, 0, cmd1167, 103, min(encryptedPassword.size, 64))
+                    }
+                    out.write(cmd1167)
+                    out.flush()
+
+                    val resp = receiveAtLeast(input, 256, 20)
+                    if (resp != null && readUInt32LE(resp, 0) == 1168L && readUInt32LE(resp, 4) == 1001L) {
+                        deviceVersion = resp[12].toInt() and 0xFF
+                        authTicket = readUInt32LE(resp, 13)
+                    }
+                }
+
+                if (authTicket == 0L) continue
+
+                Socket().use { streamSocket ->
+                    streamSocket.tcpNoDelay = true
+                    streamSocket.soTimeout = 3500
+                    streamSocket.connect(InetSocketAddress(ip, targetPort), 2500)
+                    val out = streamSocket.getOutputStream()
+                    val input = streamSocket.getInputStream()
+
+                    val cmd301 = ByteArray(256)
+                    writeUInt32LE(cmd301, 0, 301L)
+                    if (!isCloud) {
+                        writeUInt32LE(cmd301, 4, devId)
+                        writeUInt32LE(cmd301, 8, 0L)
+                        writeUInt16LE(cmd301, 12, 20)
+                        writeUInt32LE(cmd301, 14, authTicket)
+                        writeUInt32LE(cmd301, 22, 4097L)
+                    } else {
+                        writeUInt32LE(cmd301, 4, 0L)
+                        writeUInt32LE(cmd301, 8, 1002L)
+                        writeUInt16LE(cmd301, 12, 20)
+                        writeUInt32LE(cmd301, 14, authTicket)
+                        writeUInt32LE(cmd301, 22, 4097L)
+                    }
+                    out.write(cmd301)
+                    out.flush()
+
+                    val resp301 = receiveAtLeast(input, 256, 12)
+                    if (resp301 != null && readUInt32LE(resp301, 0) == 401L) {
+                        val sessionTicket = readUInt32LE(resp301, 8)
+                        val cmd303 = ByteArray(256)
+                        writeUInt32LE(cmd303, 0, 303L)
+                        writeUInt32LE(cmd303, 4, sessionTicket)
+                        cmd303[8] = 0 // Substream
+                        out.write(cmd303)
+                        out.flush()
+
+                        val headerBuf = ByteArray(12)
+                        val aesKey = generateMediaKey(authTicket)
+                        val needDecrypt = deviceVersion >= 20
+
+                        var attempts = 0
+                        while (attempts < 15) {
+                            attempts++
+                            val bytesRead = readExact(input, headerBuf, 0, 12)
+                            if (bytesRead < 12) break
+
+                            val packetType = headerBuf[0]
+                            val payloadSize = (headerBuf[1].toInt() and 0xFF) or
+                                ((headerBuf[2].toInt() and 0xFF) shl 8) or
+                                ((headerBuf[3].toInt() and 0xFF) shl 16)
+
+                            if (payloadSize <= 0 || payloadSize > 800_000) break
+                            val payload = ByteArray(payloadSize)
+                            val readLen = readExact(input, payload, 0, payloadSize)
+                            if (readLen < payloadSize) break
+
+                            if (packetType.toInt() == 0x01 || packetType.toInt() == 0x03) {
+                                val extracted = tryExtractVideoPayload(payload, needDecrypt, deviceVersion, aesKey)
+                                if (extracted != null) {
+                                    val (nalBytes, isH265) = extracted
+                                    val bmp = decodeNalToBitmap(nalBytes, isH265, 640, 360)
+                                    if (bmp != null) return@withContext bmp
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        null
+    }
+
+    private fun decodeNalToBitmap(nalBytes: ByteArray, isH265: Boolean, width: Int, height: Int): Bitmap? {
+        val mime = if (isH265) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+        var codec: MediaCodec? = null
+        return try {
+            val format = MediaFormat.createVideoFormat(mime, width, height)
+            codec = MediaCodec.createDecoderByType(mime)
+            codec.configure(format, null, null, 0)
+            codec.start()
+
+            val inIndex = codec.dequeueInputBuffer(40_000L)
+            if (inIndex >= 0) {
+                val inputBuf = codec.getInputBuffer(inIndex)
+                if (inputBuf != null) {
+                    inputBuf.clear()
+                    inputBuf.put(nalBytes, 0, nalBytes.size.coerceAtMost(inputBuf.capacity()))
+                    codec.queueInputBuffer(inIndex, 0, nalBytes.size.coerceAtMost(inputBuf.capacity()), 0L, 0)
+                }
+            }
+
+            val bufferInfo = MediaCodec.BufferInfo()
+            val outIndex = codec.dequeueOutputBuffer(bufferInfo, 80_000L)
+            if (outIndex >= 0) {
+                val image = codec.getOutputImage(outIndex)
+                val bmp = image?.let { yuvImageToBitmap(it) }
+                image?.close()
+                codec.releaseOutputBuffer(outIndex, false)
+                bmp
+            } else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                codec?.stop()
+                codec?.release()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun yuvImageToBitmap(image: android.media.Image): Bitmap? {
+        return try {
+            val yBuffer = image.planes[0].buffer
+            val uBuffer = image.planes[1].buffer
+            val vBuffer = image.planes[2].buffer
+
+            val ySize = yBuffer.remaining()
+            val uSize = uBuffer.remaining()
+            val vSize = vBuffer.remaining()
+
+            val nv21 = ByteArray(ySize + uSize + vSize)
+            yBuffer.get(nv21, 0, ySize)
+            vBuffer.get(nv21, ySize, vSize)
+            uBuffer.get(nv21, ySize + vSize, uSize)
+
+            val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
+            val out = ByteArrayOutputStream()
+            yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 80, out)
+            val jpeg = out.toByteArray()
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     suspend fun applyWifiConfig(

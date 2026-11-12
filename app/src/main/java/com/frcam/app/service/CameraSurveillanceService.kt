@@ -25,6 +25,7 @@ import com.frcam.app.media.FrameMotionDetector
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.protocol.NetworkCameraScanner
+import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,6 +34,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -239,11 +241,21 @@ class CameraSurveillanceService : Service() {
     }
 
     /**
-     * Extrae un fotograma JPEG instantáneo de la cámara vía HTTP / snapshot de manera rápida.
+     * Extrae un fotograma JPEG instantáneo de la cámara vía protocolo nativo (V380) o HTTP snapshot.
      */
-    private fun fetchCameraSampleFrame(camera: CameraConfig): Bitmap? {
+    private suspend fun fetchCameraSampleFrame(camera: CameraConfig): Bitmap? = withContext(Dispatchers.IO) {
+        // Para cámaras V380, conectar vía socket nativo al túnel y extraer el primer I-Frame H.264/H.265
+        if (camera.isV380NativeProtocol()) {
+            val v380Frame = try {
+                V380NativeProtocol.fetchNativeSampleFrame(camera)
+            } catch (_: Exception) {
+                null
+            }
+            if (v380Frame != null) return@withContext v380Frame
+        }
+
         val host = camera.host.trim()
-        if (host.isBlank() || host == "0.0.0.0") return null
+        if (host.isBlank() || host == "0.0.0.0") return@withContext null
 
         val urlsToTry = mutableListOf<String>()
         val httpPort = if (camera.httpPort > 0) camera.httpPort else 80
@@ -267,6 +279,7 @@ class CameraSurveillanceService : Service() {
             }
             else -> {
                 urlsToTry.add("http://$host:$httpPort/snapshot.jpg")
+                urlsToTry.add("http://$host:$httpPort/cgi-bin/snapshot.cgi")
                 urlsToTry.add("http://$host:$httpPort/video")
                 urlsToTry.add("http://$host:$httpPort/stream")
                 urlsToTry.add("http://$host:$httpPort/mjpeg/1")
@@ -310,7 +323,7 @@ class CameraSurveillanceService : Service() {
                                 val bytes = buffer.toByteArray()
                                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                 conn.disconnect()
-                                if (bmp != null) return bmp
+                                if (bmp != null) return@withContext bmp
                                 break
                             }
                         }
@@ -320,7 +333,7 @@ class CameraSurveillanceService : Service() {
                 conn.disconnect()
             } catch (_: Exception) {}
         }
-        return null
+        null
     }
 
     private fun createNotificationChannel() {

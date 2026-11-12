@@ -592,3 +592,21 @@ data class CameraAccessRecord(
     val connectionType: String,
     val status: String
 )
+
+@Serializable
+data class CameraRecordingEvent(
+    val id: String,
+    val cameraId: String,
+    val cameraName: String,
+    val fileName: String,
+    val startTimeSec: Long,
+    val endTimeSec: Long,
+    val durationSeconds: Int,
+    val formattedDate: String,
+    val formattedTime: String,
+    val isMotionAlarm: Boolean,
+    val eventLabel: String,
+    val sizeBytes: Long,
+    val localFilePath: String? = null,
+    val isCloudEvent: Boolean = false
+)

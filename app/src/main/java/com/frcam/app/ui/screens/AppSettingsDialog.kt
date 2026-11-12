@@ -552,7 +552,9 @@ fun AppSettingsDialog(
                                     val result = TelegramBackupEngine.sendTestMessage(telegramToken, telegramChatId)
                                     isTestingTelegram = false
                                     result.onSuccess { msg ->
-                                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        telegramEnabled = true
+                                        AppSettings.updateTelegramSettings(true, telegramToken, telegramChatId)
+                                        Toast.makeText(context, "$msg\n✅ ¡Respaldo a Telegram activado!", Toast.LENGTH_LONG).show()
                                     }.onFailure { err ->
                                         Toast.makeText(context, err.message ?: "Error al conectar con Telegram", Toast.LENGTH_LONG).show()
                                     }

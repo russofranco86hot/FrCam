@@ -169,6 +169,7 @@ fun SingleCameraDetailScreen(
     var mediaFeedback by remember(camera.id) { mutableStateOf<String?>(null) }
     var showAdminSheet by remember(camera.id) { mutableStateOf(false) }
     var showGalleryDialog by remember { mutableStateOf(false) }
+    var showRecordingsDialog by remember(camera.id) { mutableStateOf(false) }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -236,6 +237,13 @@ fun SingleCameraDetailScreen(
                                 imageVector = Icons.Default.Fullscreen,
                                 contentDescription = "Ver en Pantalla Completa",
                                 tint = Color(0xFF38BDF8)
+                            )
+                        }
+                        IconButton(onClick = { showRecordingsDialog = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Sd,
+                                contentDescription = "Grabaciones y Eventos de la Cámara",
+                                tint = Color(0xFFF59E0B)
                             )
                         }
                         IconButton(onClick = { showGalleryDialog = true }) {
@@ -691,6 +699,24 @@ fun SingleCameraDetailScreen(
                                 Icon(
                                     imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                                     contentDescription = null,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        )
+
+                        AssistChip(
+                            onClick = { showRecordingsDialog = true },
+                            label = {
+                                Text(
+                                    text = "Eventos & SD",
+                                    fontSize = 11.sp
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Sd,
+                                    contentDescription = null,
+                                    tint = Color(0xFFF59E0B),
                                     modifier = Modifier.size(15.dp)
                                 )
                             }
@@ -1355,6 +1381,13 @@ fun SingleCameraDetailScreen(
     if (showGalleryDialog) {
         MediaGalleryDialog(
             onDismiss = { showGalleryDialog = false }
+        )
+    }
+
+    if (showRecordingsDialog) {
+        CameraRecordingsDialog(
+            camera = camera,
+            onDismiss = { showRecordingsDialog = false }
         )
     }
 }

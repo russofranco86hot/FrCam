@@ -139,6 +139,7 @@ fun CameraAdminBottomSheet(
     var showRebootConfirm by remember { mutableStateOf(false) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var showFormatConfirm by remember { mutableStateOf(false) }
+    var showRecordingsDialog by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -245,7 +246,8 @@ fun CameraAdminBottomSheet(
                         deviceInfo = deviceInfo,
                         onToggleMotionTracking = onToggleMotionTracking,
                         onTogglePtzPatrol = onTogglePtzPatrol,
-                        onPromptFormatSd = { showFormatConfirm = true }
+                        onPromptFormatSd = { showFormatConfirm = true },
+                        onOpenRecordings = { showRecordingsDialog = true }
                     )
                     AdminTab.ACCESS_LOGS -> AccessLogsTab(accessLogs)
                     AdminTab.IP_NETWORK -> IpNetworkTab(camera, deviceInfo, onUpdateIp)
@@ -331,6 +333,13 @@ fun CameraAdminBottomSheet(
                     Text("Cancelar")
                 }
             }
+        )
+    }
+
+    if (showRecordingsDialog) {
+        CameraRecordingsDialog(
+            camera = camera,
+            onDismiss = { showRecordingsDialog = false }
         )
     }
 }
@@ -806,7 +815,8 @@ private fun RecordAndPtzTab(
     deviceInfo: CameraDeviceInfo?,
     onToggleMotionTracking: (Boolean) -> Unit,
     onTogglePtzPatrol: (Boolean) -> Unit,
-    onPromptFormatSd: () -> Unit
+    onPromptFormatSd: () -> Unit,
+    onOpenRecordings: () -> Unit = {}
 ) {
     val totalMb = deviceInfo?.sdCardTotalMb ?: 61440L
     val freeMb = deviceInfo?.sdCardFreeMb ?: 31200L
@@ -858,6 +868,21 @@ private fun RecordAndPtzTab(
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
+
+                FilledTonalButton(
+                    onClick = onOpenRecordings,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = androidx.compose.ui.graphics.Color(0xFFF59E0B).copy(alpha = 0.2f),
+                        contentColor = androidx.compose.ui.graphics.Color(0xFFF59E0B)
+                    )
+                ) {
+                    Icon(Icons.Default.SdCard, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Ver Grabaciones y Eventos de la MicroSD")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 OutlinedButton(
                     onClick = onPromptFormatSd,

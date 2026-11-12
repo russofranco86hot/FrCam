@@ -185,12 +185,10 @@ object CameraMediaEngine {
         )
         _motionEvents.value = (listOf(event) + _motionEvents.value).take(30)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                return
-            }
+        val canPostNotification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
         }
 
         val intent = Intent(context, MainActivity::class.java).apply {
@@ -344,13 +342,18 @@ object CameraMediaEngine {
             snoozePending
         )
 
-        NotificationManagerCompat.from(context)
-            .notify(notifId, builder.build())
+        if (canPostNotification) {
+            NotificationManagerCompat.from(context)
+                .notify(notifId, builder.build())
+        } else {
+            android.util.Log.w("CameraMediaEngine", "Permiso POST_NOTIFICATIONS no concedido. Se omitió la notificación local de estado.")
+        }
 
-        // Respaldo Automático a Telegram si está configurado
+        // Respaldo Automático a Telegram si está configurado (SIEMPRE se ejecuta sin importar notificaciones locales)
         if (AppSettings.telegramEnabled && AppSettings.telegramBotToken.isNotBlank() && AppSettings.telegramChatId.isNotBlank()) {
             CoroutineScope(Dispatchers.IO).launch {
-                com.frcam.app.backup.TelegramBackupEngine.sendMotionAlert(
+                android.util.Log.i("CameraMediaEngine", "Enviando alerta de movimiento y GIF animado a Telegram...")
+                val res = com.frcam.app.backup.TelegramBackupEngine.sendMotionAlert(
                     botToken = AppSettings.telegramBotToken,
                     chatId = AppSettings.telegramChatId,
                     cameraName = cameraName,
@@ -358,6 +361,10 @@ object CameraMediaEngine {
                     snapshot = stampedBitmap,
                     aiLabel = aiBadge,
                     timestampStr = timeStr
+                )
+                res.fold(
+                    onSuccess = { android.util.Log.i("CameraMediaEngine", "✅ Alerta enviada a Telegram con éxito ($cameraName)") },
+                    onFailure = { android.util.Log.e("CameraMediaEngine", "❌ Error enviando alerta a Telegram: ${it.message}", it) }
                 )
             }
         }
