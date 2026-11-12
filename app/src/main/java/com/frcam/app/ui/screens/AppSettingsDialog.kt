@@ -536,8 +536,8 @@ fun AppSettingsDialog(
                         )
 
                         Text(
-                            text = "💡 Para obtener tu Bot Token habla con @BotFather en Telegram. Para conocer tu Chat ID envía un mensaje a @userinfobot.",
-                            fontSize = 10.sp,
+                            text = "💡 Importante: 1) En @BotFather crea tu bot. 2) Abre el chat de tu bot y presiona 'INICIAR' (/start). 3) Obtén tu Chat ID numérico en @userinfobot (solo números, ej. 987654321, no tu @usuario).",
+                            fontSize = 11.sp,
                             color = Color(0xFF94A3B8)
                         )
 

@@ -133,13 +133,19 @@ object AppSettings {
     }
 
     fun updateTelegramSettings(enabled: Boolean, botToken: String, chatId: String) {
+        var cleanToken = botToken.trim().replace("\"", "").replace("'", "")
+        if (cleanToken.startsWith("bot", ignoreCase = true)) {
+            cleanToken = cleanToken.substring(3).trim()
+        }
+        val cleanChatId = chatId.trim().replace("\"", "").replace("'", "")
+
         telegramEnabled = enabled
-        telegramBotToken = botToken.trim()
-        telegramChatId = chatId.trim()
+        telegramBotToken = cleanToken
+        telegramChatId = cleanChatId
         prefs.edit()
             .putBoolean("telegram_enabled", enabled)
-            .putString("telegram_bot_token", telegramBotToken)
-            .putString("telegram_chat_id", telegramChatId)
+            .putString("telegram_bot_token", cleanToken)
+            .putString("telegram_chat_id", cleanChatId)
             .apply()
     }
 

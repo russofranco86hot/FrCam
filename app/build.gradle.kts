@@ -15,8 +15,8 @@ android {
         applicationId = "com.frcam.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 30
-        versionName = "1.3.4"
+        versionCode = 31
+        versionName = "1.3.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -119,6 +119,7 @@ dependencies {
     implementation(libs.media3.rtsp)
     implementation(libs.media3.hls)
     implementation(libs.media3.okhttp)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(libs.media3.ui)
     implementation(libs.media3.common)
 
