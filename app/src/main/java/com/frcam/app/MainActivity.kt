@@ -362,9 +362,14 @@ class MainActivity : ComponentActivity() {
                         scanStatusText = scanStatusText,
                         discoveredDevices = discoveredDevices,
                         existingCameraIps = cameras.map { it.host }.toSet(),
-                        onAddDiscoveredCameras = { list, targetGroup ->
+                        onAddDiscoveredCameras = { list, targetGroup, defaultUser, defaultPass ->
                             val configs = list.map { dev ->
-                                viewModel.buildConfigFromDiscovered(dev, groupName = targetGroup)
+                                viewModel.buildConfigFromDiscovered(
+                                    dev,
+                                    username = if (defaultUser.isNotBlank()) defaultUser else dev.detectedBrand.defaultUsername,
+                                    password = defaultPass,
+                                    groupName = targetGroup
+                                )
                             }
                             viewModel.addMultipleCameras(configs)
                         },

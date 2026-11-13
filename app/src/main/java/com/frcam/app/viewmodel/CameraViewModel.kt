@@ -627,13 +627,30 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             ConnectionMode.LAN_IP
         }
-        val hasRtsp = device.openPorts.contains(554) || device.openPorts.contains(8554) || device.rtspPort > 0
+        val hasRtsp = device.openPorts.contains(554) || device.openPorts.contains(8554) || device.rtspPort > 0 ||
+                device.openPorts.contains(7070) || device.openPorts.contains(8000) ||
+                device.detectedBrand == CameraBrand.HIKVISION || device.detectedBrand == CameraBrand.EZVIZ ||
+                device.detectedBrand == CameraBrand.DAHUA || device.detectedBrand == CameraBrand.ONVIF_GENERIC ||
+                device.detectedBrand == CameraBrand.CUSTOM_RTSP
+
         val resolvedProtocol = when {
             device.detectedBrand == CameraBrand.V720_NAXCLOW && (device.openPorts.contains(6123) || device.openPorts.contains(20190) || device.openPorts.contains(10002)) -> StreamProtocol.V720_LAN
             device.detectedBrand == CameraBrand.V380_PRO -> StreamProtocol.V380_NATIVE
+            device.detectedBrand == CameraBrand.ONVIF_GENERIC -> StreamProtocol.ONVIF_AUTO
+            device.detectedBrand == CameraBrand.HIKVISION || device.detectedBrand == CameraBrand.EZVIZ ||
+                device.detectedBrand == CameraBrand.DAHUA || device.detectedBrand == CameraBrand.CUSTOM_RTSP -> StreamProtocol.RTSP
             hasRtsp -> StreamProtocol.RTSP
-            device.detectedBrand == CameraBrand.ANDROID_IP_WEBCAM || device.detectedBrand == CameraBrand.ESP32_CAM || device.openPorts.contains(8080) || device.openPorts.contains(81) || device.openPorts.contains(80) -> StreamProtocol.HTTP_MJPEG
+            device.detectedBrand == CameraBrand.ANDROID_IP_WEBCAM || device.detectedBrand == CameraBrand.ESP32_CAM -> StreamProtocol.HTTP_MJPEG
+            device.openPorts.contains(8080) || device.openPorts.contains(81) -> StreamProtocol.HTTP_MJPEG
             else -> device.detectedBrand.defaultProtocol
+        }
+        val resolvedRtspPort = when {
+            device.rtspPort > 0 -> device.rtspPort
+            device.openPorts.contains(554) -> 554
+            device.openPorts.contains(8554) -> 8554
+            device.openPorts.contains(7070) -> 7070
+            hasRtsp -> 554
+            else -> 0
         }
         return CameraConfig(
             name = device.deviceName,
@@ -645,7 +662,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             remoteRtspPort = device.remoteRtspPort,
             remoteHttpPort = device.remoteHttpPort,
             upnpMapped = device.upnpMapped,
-            rtspPort = if (hasRtsp) (if (device.rtspPort > 0) device.rtspPort else 554) else 0,
+            rtspPort = resolvedRtspPort,
             httpPort = device.httpPort,
             onvifPort = device.onvifPort,
             username = username,
@@ -656,5 +673,21 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             ptzType = device.detectedBrand.defaultPtzType,
             groupName = groupName
         )
+    }
+
+    fun updateCredentialsForGroup(groupName: String, user: String, pass: String) {
+        viewModelScope.launch {
+            val updated = cameras.value.map { cam ->
+                if (cam.groupName.equals(groupName, ignoreCase = true)) {
+                    cam.copy(
+                        username = if (user.isNotBlank()) user.trim() else cam.username,
+                        password = pass
+                    )
+                } else {
+                    cam
+                }
+            }
+            repository.saveCameras(updated)
+        }
     }
 }

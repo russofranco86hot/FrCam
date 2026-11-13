@@ -27,6 +27,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,11 +48,13 @@ import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.HighQuality
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsOff
@@ -61,24 +65,31 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -98,6 +109,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -170,6 +183,11 @@ fun SingleCameraDetailScreen(
     var showAdminSheet by remember(camera.id) { mutableStateOf(false) }
     var showGalleryDialog by remember { mutableStateOf(false) }
     var showRecordingsDialog by remember(camera.id) { mutableStateOf(false) }
+    var showDetailMenu by remember { mutableStateOf(false) }
+    var showAuthDialog by remember(camera.id) { mutableStateOf(false) }
+    var inputAuthUser by remember(camera.id, camera.username) { mutableStateOf(camera.username.ifBlank { "admin" }) }
+    var inputAuthPass by remember(camera.id, camera.password) { mutableStateOf(camera.password) }
+    var inputAuthPassVisible by remember { mutableStateOf(false) }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -211,10 +229,10 @@ fun SingleCameraDetailScreen(
             if (!isInPipMode && !isFullscreen) {
                 TopAppBar(
                     title = {
-                        Column {
+                        Column(modifier = Modifier.fillMaxWidth()) {
                             Text(
                                 text = camera.name,
-                                fontSize = 17.sp,
+                                fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -222,6 +240,8 @@ fun SingleCameraDetailScreen(
                             Text(
                                 text = "${camera.brand.displayName} • ${camera.displayAddressLabel()}",
                                 fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -239,27 +259,6 @@ fun SingleCameraDetailScreen(
                                 tint = Color(0xFF38BDF8)
                             )
                         }
-                        IconButton(onClick = { showRecordingsDialog = true }) {
-                            Icon(
-                                imageVector = Icons.Default.Sd,
-                                contentDescription = "Grabaciones y Eventos de la Cámara",
-                                tint = Color(0xFFF59E0B)
-                            )
-                        }
-                        IconButton(onClick = { showGalleryDialog = true }) {
-                            Icon(
-                                imageVector = Icons.Default.PhotoLibrary,
-                                contentDescription = "Galería de imágenes y videos",
-                                tint = Color(0xFFA78BFA)
-                            )
-                        }
-                        IconButton(onClick = onEnterPipMode) {
-                            Icon(
-                                imageVector = Icons.Default.PictureInPictureAlt,
-                                contentDescription = "Ventana flotante (PiP)",
-                                tint = Color(0xFF38BDF8)
-                            )
-                        }
                         IconButton(
                             onClick = {
                                 onOpenAdmin()
@@ -272,15 +271,106 @@ fun SingleCameraDetailScreen(
                                 tint = Color(0xFF10B981)
                             )
                         }
-                        IconButton(onClick = { onEdit(camera) }) {
-                            Icon(Icons.Default.Edit, contentDescription = "Editar cámara")
-                        }
-                        IconButton(onClick = { onDelete(camera.id) }) {
-                            Icon(
-                                imageVector = Icons.Default.DeleteOutline,
-                                contentDescription = "Eliminar cámara",
-                                tint = Color(0xFFF87171)
-                            )
+                        Box {
+                            IconButton(onClick = { showDetailMenu = true }) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "Más opciones"
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showDetailMenu,
+                                onDismissRequest = { showDetailMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Eventos y Grabaciones (SD)") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Sd,
+                                            contentDescription = null,
+                                            tint = Color(0xFFF59E0B)
+                                        )
+                                    },
+                                    onClick = {
+                                        showDetailMenu = false
+                                        showRecordingsDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Galería FrCam") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.PhotoLibrary,
+                                            contentDescription = null,
+                                            tint = Color(0xFFA78BFA)
+                                        )
+                                    },
+                                    onClick = {
+                                        showDetailMenu = false
+                                        showGalleryDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Ventana flotante (PiP)") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.PictureInPictureAlt,
+                                            contentDescription = null,
+                                            tint = Color(0xFF38BDF8)
+                                        )
+                                    },
+                                    onClick = {
+                                        showDetailMenu = false
+                                        onEnterPipMode()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Usuario y Contraseña") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Key,
+                                            contentDescription = null,
+                                            tint = Color(0xFF10B981)
+                                        )
+                                    },
+                                    onClick = {
+                                        showDetailMenu = false
+                                        inputAuthUser = camera.username.ifBlank { "admin" }
+                                        inputAuthPass = camera.password
+                                        showAuthDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Editar cámara") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Edit, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showDetailMenu = false
+                                        onEdit(camera)
+                                    }
+                                )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = "Eliminar cámara",
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.DeleteOutline,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    onClick = {
+                                        showDetailMenu = false
+                                        onDelete(camera.id)
+                                    }
+                                )
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -654,6 +744,54 @@ fun SingleCameraDetailScreen(
             }
 
             if (!isInPipMode && !isFullscreen) {
+                if (camera.password.isBlank() && camera.brand != CameraBrand.V720_NAXCLOW) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF451A03)),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(
+                                    imageVector = Icons.Default.Key,
+                                    contentDescription = null,
+                                    tint = Color(0xFFF59E0B),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text("Contraseña no configurada", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
+                                    Text(
+                                        if (camera.brand == CameraBrand.EZVIZ) "Ingresa el código de 6 letras de la etiqueta"
+                                        else "Ingresa la contraseña para ver el video",
+                                        fontSize = 10.sp,
+                                        color = Color(0xFFFDE68A)
+                                    )
+                                }
+                            }
+                            Button(
+                                onClick = {
+                                    inputAuthUser = camera.username.ifBlank { "admin" }
+                                    inputAuthPass = camera.password
+                                    showAuthDialog = true
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B), contentColor = Color.Black),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text("Ingresar", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
                 // Stream Quick Toolbar + Recording & Motion Actions
             Column(
                 modifier = Modifier
@@ -1388,6 +1526,87 @@ fun SingleCameraDetailScreen(
         CameraRecordingsDialog(
             camera = camera,
             onDismiss = { showRecordingsDialog = false }
+        )
+    }
+
+    if (showAuthDialog) {
+        AlertDialog(
+            onDismissRequest = { showAuthDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Key,
+                        contentDescription = null,
+                        tint = Color(0xFFF59E0B),
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Credenciales de la Cámara", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Configura el usuario y contraseña para conectar y reproducir video en '${camera.name}'.",
+                        fontSize = 12.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    OutlinedTextField(
+                        value = inputAuthUser,
+                        onValueChange = { inputAuthUser = it },
+                        label = { Text("Usuario (admin)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = inputAuthPass,
+                        onValueChange = { inputAuthPass = it },
+                        label = { Text(if (camera.brand == CameraBrand.EZVIZ) "Código de verificación (6 letras)" else "Contraseña") },
+                        singleLine = true,
+                        visualTransformation = if (inputAuthPassVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { inputAuthPassVisible = !inputAuthPassVisible }) {
+                                Icon(
+                                    imageVector = if (inputAuthPassVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text("Probar clave rápida:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("12345", "123456", "admin", "admin123", "admin12345", "888888").forEach { pwd ->
+                            AssistChip(
+                                onClick = { inputAuthPass = pwd },
+                                label = { Text(pwd, fontSize = 10.sp) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAuthDialog = false
+                        val updated = camera.copy(
+                            username = inputAuthUser.trim(),
+                            password = inputAuthPass
+                        )
+                        onUpdateCamera(updated)
+                        Toast.makeText(context, "Credenciales actualizadas. Reconectando...", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                ) {
+                    Text("Guardar y Conectar")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showAuthDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
         )
     }
 }

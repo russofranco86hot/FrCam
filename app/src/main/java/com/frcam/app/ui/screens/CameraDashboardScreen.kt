@@ -54,7 +54,11 @@ import androidx.compose.material.icons.filled.Watch
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.PlayCircleOutline
@@ -147,6 +151,10 @@ fun CameraDashboardScreen(
     var newGroupNameInput by remember { mutableStateOf("") }
     var cameraToMoveGroup by remember { mutableStateOf<CameraConfig?>(null) }
     var moveTargetGroup by remember { mutableStateOf("") }
+    var showGroupAuthDialog by remember { mutableStateOf(false) }
+    var groupAuthUser by remember { mutableStateOf("admin") }
+    var groupAuthPass by remember { mutableStateOf("") }
+    var groupAuthPassVisible by remember { mutableStateOf(false) }
 
     val displayedCameras = remember(cameras, selectedGroup) {
         if (selectedGroup == "Todas") {
@@ -315,6 +323,88 @@ fun CameraDashboardScreen(
             },
             dismissButton = {
                 OutlinedButton(onClick = { showNewGroupDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    if (showGroupAuthDialog) {
+        AlertDialog(
+            onDismissRequest = { showGroupAuthDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Key, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Clave para '$selectedGroup'", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Aplica este usuario y contraseña a todas las ${displayedCameras.size} cámaras del grupo '$selectedGroup'.",
+                        fontSize = 12.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    OutlinedTextField(
+                        value = groupAuthUser,
+                        onValueChange = { groupAuthUser = it },
+                        label = { Text("Usuario (admin)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = groupAuthPass,
+                        onValueChange = { groupAuthPass = it },
+                        label = { Text("Contraseña / Cód. verificación (EZVIZ)") },
+                        singleLine = true,
+                        visualTransformation = if (groupAuthPassVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { groupAuthPassVisible = !groupAuthPassVisible }) {
+                                Icon(
+                                    imageVector = if (groupAuthPassVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text("Probar clave rápida:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("12345", "123456", "admin", "admin123").forEach { pwd ->
+                            OutlinedButton(
+                                onClick = { groupAuthPass = pwd },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text(pwd, fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showGroupAuthDialog = false
+                        displayedCameras.forEach { cam ->
+                            onUpdateCamera?.invoke(
+                                cam.copy(
+                                    username = groupAuthUser.trim(),
+                                    password = groupAuthPass
+                                )
+                            )
+                        }
+                        Toast.makeText(context, "Credenciales aplicadas a ${displayedCameras.size} cámara(s)", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                ) {
+                    Text("Aplicar a Todas")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showGroupAuthDialog = false }) {
                     Text("Cancelar")
                 }
             }
@@ -581,6 +671,23 @@ fun CameraDashboardScreen(
                             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("Nuevo Grupo", fontSize = 11.sp)
+                        }
+                    }
+                    if (selectedGroup != "Todas" && displayedCameras.isNotEmpty()) {
+                        item {
+                            OutlinedButton(
+                                onClick = {
+                                    groupAuthUser = "admin"
+                                    groupAuthPass = ""
+                                    showGroupAuthDialog = true
+                                },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Icon(Icons.Default.Key, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Clave a Grupo", fontSize = 11.sp, color = Color(0xFFF59E0B))
+                            }
                         }
                     }
                 }

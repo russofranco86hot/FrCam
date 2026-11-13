@@ -68,6 +68,9 @@ import androidx.compose.material.icons.filled.BluetoothSearching
 import com.frcam.app.protocol.CameraProvisioningEngine
 import com.frcam.app.protocol.WaitingCameraAp
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
@@ -988,7 +991,7 @@ fun LanDiscoveryDialog(
     onStartScan: () -> Unit,
     onSelectDevice: (DiscoveredCameraDevice) -> Unit,
     existingCameraIps: Set<String> = emptySet(),
-    onAddDiscoveredCameras: (List<DiscoveredCameraDevice>, String) -> Unit = { _, _ -> },
+    onAddDiscoveredCameras: (List<DiscoveredCameraDevice>, String, String, String) -> Unit = { _, _, _, _ -> },
     waitingCameraAps: List<WaitingCameraAp> = emptyList(),
     isScanningWaiting: Boolean = false,
     isProvisioning: Boolean = false,
@@ -1010,6 +1013,9 @@ fun LanDiscoveryDialog(
     var localAddedIps by remember { mutableStateOf(setOf<String>()) }
     var isMultiSelectMode by remember { mutableStateOf(false) }
     var selectedForBatch by remember { mutableStateOf(setOf<String>()) }
+    var batchUsername by remember { mutableStateOf("admin") }
+    var batchPassword by remember { mutableStateOf("") }
+    var batchPasswordVisible by remember { mutableStateOf(false) }
 
     // Estados para el aprovisionamiento de cámara nueva a Wi-Fi de casa
     val (savedWifiSsid, savedWifiPass) = remember { CameraProvisioningEngine.getSavedWifiCredentials(context) }
@@ -1246,6 +1252,68 @@ fun LanDiscoveryDialog(
                             }
                         }
 
+                        // Credenciales por defecto para cámaras descubiertas
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Key,
+                                        contentDescription = null,
+                                        tint = Color(0xFF38BDF8),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Credenciales para conectar (Hikvision, EZVIZ, ONVIF, Dahua):",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White
+                                    )
+                                }
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    OutlinedTextField(
+                                        value = batchUsername,
+                                        onValueChange = { batchUsername = it },
+                                        label = { Text("Usuario", fontSize = 10.sp) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    OutlinedTextField(
+                                        value = batchPassword,
+                                        onValueChange = { batchPassword = it },
+                                        label = { Text("Contraseña / Cód. verificación", fontSize = 10.sp) },
+                                        singleLine = true,
+                                        visualTransformation = if (batchPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                                        trailingIcon = {
+                                            IconButton(onClick = { batchPasswordVisible = !batchPasswordVisible }) {
+                                                Icon(
+                                                    imageVector = if (batchPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1.5f)
+                                    )
+                                }
+                                Text(
+                                    text = "💡 Para EZVIZ: Código de 6 letras de la etiqueta. Para Hikvision/Dahua: Tu clave de admin.",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+
                         // Barra de acción: Agregar Todas y Elegir Varias
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1257,7 +1325,7 @@ fun LanDiscoveryDialog(
                                     val toAdd = discoveredDevices.filter { dev ->
                                         !existingCameraIps.contains(dev.ipAddress) && !localAddedIps.contains(dev.ipAddress)
                                     }.ifEmpty { discoveredDevices }
-                                    onAddDiscoveredCameras(toAdd, selectedTargetGroup)
+                                    onAddDiscoveredCameras(toAdd, selectedTargetGroup, batchUsername.trim(), batchPassword)
                                     localAddedIps = localAddedIps + toAdd.map { it.ipAddress }
                                     Toast.makeText(context, "Se agregaron ${toAdd.size} cámara(s) a '$selectedTargetGroup'", Toast.LENGTH_SHORT).show()
                                 },
@@ -1274,7 +1342,7 @@ fun LanDiscoveryDialog(
                                     if (isMultiSelectMode) {
                                         val toAdd = discoveredDevices.filter { selectedForBatch.contains(it.ipAddress) }
                                         if (toAdd.isNotEmpty()) {
-                                            onAddDiscoveredCameras(toAdd, selectedTargetGroup)
+                                            onAddDiscoveredCameras(toAdd, selectedTargetGroup, batchUsername.trim(), batchPassword)
                                             localAddedIps = localAddedIps + toAdd.map { it.ipAddress }
                                             Toast.makeText(context, "Se agregaron ${toAdd.size} cámara(s) a '$selectedTargetGroup'", Toast.LENGTH_SHORT).show()
                                             selectedForBatch = emptySet()
@@ -1383,7 +1451,7 @@ fun LanDiscoveryDialog(
                                         } else if (!isMultiSelectMode) {
                                             IconButton(
                                                 onClick = {
-                                                    onAddDiscoveredCameras(listOf(dev), selectedTargetGroup)
+                                                    onAddDiscoveredCameras(listOf(dev), selectedTargetGroup, batchUsername.trim(), batchPassword)
                                                     localAddedIps = localAddedIps + dev.ipAddress
                                                     Toast.makeText(context, "${dev.deviceName} agregada a '$selectedTargetGroup'", Toast.LENGTH_SHORT).show()
                                                 }
