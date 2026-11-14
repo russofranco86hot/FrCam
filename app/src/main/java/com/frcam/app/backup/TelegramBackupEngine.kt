@@ -301,4 +301,71 @@ object TelegramBackupEngine {
             Result.failure(e)
         }
     }
+
+    /**
+     * Sube un clip de video MP4 (grabación continua en franja horaria o clip de movimiento) a Telegram.
+     */
+    suspend fun sendVideoClip(
+        botToken: String,
+        chatId: String,
+        cameraName: String,
+        videoFile: File,
+        captionLabel: String,
+        timestampStr: String
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        val token = sanitizeToken(botToken)
+        val chat = sanitizeChatId(chatId)
+
+        if (token.isBlank() || chat.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Token o Chat ID de Telegram no configurados."))
+        }
+        if (!videoFile.exists() || videoFile.length() < 512L) {
+            return@withContext Result.failure(IllegalArgumentException("Archivo de video vacío o inexistente."))
+        }
+        val maxTelegramBytes = 48L * 1024L * 1024L
+        if (videoFile.length() > maxTelegramBytes) {
+            return@withContext Result.failure(IllegalArgumentException("El video supera el límite de 48 MB de Telegram (${videoFile.length() / (1024 * 1024)} MB). Reduce la duración del segmento."))
+        }
+
+        try {
+            val caption = buildString {
+                append("🎬 <b>$captionLabel: $cameraName</b>\n")
+                append("⏰ <b>Hora:</b> $timestampStr\n")
+                append("💾 <i>Guardado también en Movies/FrCam</i>")
+            }
+
+            val videoBody = videoFile.asRequestBody("video/mp4".toMediaType())
+            val multipart = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("chat_id", chat)
+                .addFormDataPart("caption", caption)
+                .addFormDataPart("parse_mode", "HTML")
+                .addFormDataPart("supports_streaming", "true")
+                .addFormDataPart("video", videoFile.name, videoBody)
+                .build()
+
+            val request = Request.Builder()
+                .url("https://api.telegram.org/bot$token/sendVideo")
+                .post(multipart)
+                .header("User-Agent", "FrCam-Android/1.3")
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                val bodyStr = response.body?.string().orEmpty()
+                val json = try { JSONObject(bodyStr) } catch (_: Exception) { JSONObject() }
+                val ok = json.optBoolean("ok", false)
+                if (response.isSuccessful && ok) {
+                    Log.i(TAG, "Video MP4 respaldado exitosamente en Telegram ($cameraName)")
+                    Result.success(true)
+                } else {
+                    val desc = json.optString("description", "Error ${response.code} en Telegram")
+                    Log.w(TAG, "Error enviando video a Telegram: $desc")
+                    Result.failure(Exception(desc))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Excepción enviando video a Telegram", e)
+            Result.failure(e)
+        }
+    }
 }

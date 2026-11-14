@@ -273,6 +273,21 @@ fun UniversalCameraPlayer(
     var motionActiveBanner by remember(camera.id) { mutableStateOf(false) }
     var lastMotionAtMs by remember(camera.id) { mutableLongStateOf(0L) }
 
+    // Marca esta cámara como activa en primer plano para que el servicio en segundo plano
+    // no compita por el mismo socket/decoder ni dispare falsas alertas por reconexión.
+    DisposableEffect(camera.id) {
+        CameraMediaEngine.markCameraActiveInForeground(camera.id)
+        onDispose {
+            CameraMediaEngine.clearCameraActiveInForeground(camera.id)
+        }
+    }
+    LaunchedEffect(camera.id) {
+        while (isActive) {
+            CameraMediaEngine.markCameraActiveInForeground(camera.id)
+            delay(2000L)
+        }
+    }
+
     // La detección corre si hay alertas activadas O si la grabación automática depende del movimiento.
     // Las notificaciones solo se envían cuando las alertas están activadas.
     val needsMotionDetection = camera.motionDetectionEnabled || camera.autoRecordMode == AutoRecordMode.MOTION
@@ -340,11 +355,16 @@ fun UniversalCameraPlayer(
         }
     }
 
-    // Grabación automática (al detectar movimiento o en franja horaria) a Galería: Movies/FrCam
+    // Grabación automática (al detectar movimiento o en franja horaria) a Galería: Movies/FrCam + Telegram
     val autoRecorder = remember(camera.id) { LiveMp4VideoRecorder(context, camera.name) }
     LaunchedEffect(camera.id, camera.autoRecordMode) {
         val mode = camera.autoRecordMode
         if (mode != AutoRecordMode.MOTION && mode != AutoRecordMode.SCHEDULE) return@LaunchedEffect
+        val captionLabel = if (mode == AutoRecordMode.SCHEDULE) {
+            "Grabación Continua (Franja Horaria)"
+        } else {
+            "Clip de Movimiento"
+        }
         var segmentStartMs = 0L
         try {
             while (isActive) {
@@ -365,14 +385,26 @@ fun UniversalCameraPlayer(
                     val segmentExpired = mode == AutoRecordMode.SCHEDULE &&
                         now - segmentStartMs >= AppSettings.scheduleSegmentMinutes * 60_000L
                     if (!wantRecording || segmentExpired) {
-                        withContext(Dispatchers.IO) { autoRecorder.stopAndSaveToGallery() }
+                        withContext(Dispatchers.IO) {
+                            autoRecorder.stopAndSaveToGallery(
+                                sendToTelegram = true,
+                                captionLabel = captionLabel
+                            )
+                        }
+                        segmentStartMs = 0L
                     }
                 }
                 delay(1000L)
             }
         } finally {
             if (autoRecorder.isRecording) {
-                withContext(NonCancellable) { autoRecorder.stopAndSaveToGallery() }
+                val elapsed = if (segmentStartMs > 0L) System.currentTimeMillis() - segmentStartMs else 0L
+                withContext(NonCancellable) {
+                    autoRecorder.stopAndSaveToGallery(
+                        sendToTelegram = elapsed >= 2000L,
+                        captionLabel = captionLabel
+                    )
+                }
             }
         }
     }

@@ -358,7 +358,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 if (cam.id == cameraId) {
                     cam.copy(
                         motionDetectionEnabled = enabled,
-                        autoRecordMode = autoRecord ?: (if (enabled) "GIF" else "OFF")
+                        autoRecordMode = autoRecord ?: cam.autoRecordMode
                     )
                 } else cam
             }

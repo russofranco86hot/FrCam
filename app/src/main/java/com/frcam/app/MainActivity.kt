@@ -115,7 +115,9 @@ class MainActivity : ComponentActivity() {
                 val cameras by viewModel.cameras.collectAsState()
 
                 LaunchedEffect(cameras, AppSettings.backgroundSurveillanceEnabled) {
-                    if (AppSettings.backgroundSurveillanceEnabled && cameras.any { it.motionDetectionEnabled }) {
+                    val hasMotion = AppSettings.backgroundSurveillanceEnabled && cameras.any { it.motionDetectionEnabled }
+                    val hasSchedule = cameras.any { it.autoRecordMode == com.frcam.app.data.AutoRecordMode.SCHEDULE }
+                    if (hasMotion || hasSchedule) {
                         com.frcam.app.service.CameraSurveillanceService.startOrUpdate(this@MainActivity)
                     }
                 }

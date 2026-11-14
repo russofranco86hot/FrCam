@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -18,10 +19,12 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.frcam.app.MainActivity
 import com.frcam.app.data.AppSettings
+import com.frcam.app.data.AutoRecordMode
 import com.frcam.app.data.CameraRepository
 import com.frcam.app.ai.CameraAiDetector
 import com.frcam.app.media.CameraMediaEngine
 import com.frcam.app.media.FrameMotionDetector
+import com.frcam.app.media.LiveMp4VideoRecorder
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.CameraConfig
 import com.frcam.app.protocol.NetworkCameraScanner
@@ -29,16 +32,23 @@ import com.frcam.app.protocol.V380NativeProtocol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -91,11 +101,21 @@ class CameraSurveillanceService : Service() {
         }
     }
 
+    private data class ScheduledRecSession(
+        val recorder: LiveMp4VideoRecorder,
+        val startedAtMs: Long,
+        val cameraName: String
+    )
+
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private val motionDetectors = ConcurrentHashMap<String, FrameMotionDetector>()
     private val lastTriggerTimes = ConcurrentHashMap<String, Long>()
+    private val lastSampleTimes = ConcurrentHashMap<String, Long>()
+    private val pendingMotionHits = ConcurrentHashMap<String, Pair<Int, Long>>()
+    private val scheduledRecorders = ConcurrentHashMap<String, ScheduledRecSession>()
+    private val rtspCooldownUntilMs = ConcurrentHashMap<String, Long>()
 
     override fun onCreate() {
         super.onCreate()
@@ -123,6 +143,7 @@ class CameraSurveillanceService : Service() {
         }
 
         startMonitoringLoop()
+        startScheduledRecordingLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -144,6 +165,7 @@ class CameraSurveillanceService : Service() {
     private fun startMonitoringLoop() {
         serviceScope.launch {
             val repository = CameraRepository(applicationContext)
+            val semaphore = Semaphore(4)
             while (isActive) {
                 try {
                     if (!AppSettings.backgroundSurveillanceEnabled) {
@@ -160,82 +182,201 @@ class CameraSurveillanceService : Service() {
 
                     val allCameras = repository.camerasFlow.first()
                     val monitoredCameras = allCameras.filter { it.motionDetectionEnabled }
+                    val activeRecCount = scheduledRecorders.size
 
-                    if (monitoredCameras.isEmpty()) {
+                    if (monitoredCameras.isEmpty() && activeRecCount == 0) {
                         updateNotification("Protegiendo 0 cámaras (activa la campana en tus cámaras)")
                         delay(4000L)
                         continue
                     }
 
-                    updateNotification("Protegiendo ${monitoredCameras.size} cámara(s) • Alertas y Telegram activos")
+                    val recSuffix = if (activeRecCount > 0) " • Grabando $activeRecCount en horario" else ""
+                    updateNotification("Protegiendo ${monitoredCameras.size} cámara(s)$recSuffix")
 
-                    // Muestrear cada cámara activa
-                    for (camera in monitoredCameras) {
-                        if (!isActive) break
-                        if (isSnoozed(camera.id)) continue
-
-                        val now = System.currentTimeMillis()
-                        val lastAlert = lastTriggerTimes[camera.id] ?: 0L
-                        if (now - lastAlert < 15000L) {
-                            // En período de enfriamiento para no duplicar alertas
-                            continue
-                        }
-
-                        // Obtener cuadro de muestra de forma ultra liviana
-                        val sampleBitmap = fetchCameraSampleFrame(camera)
-                        if (sampleBitmap != null) {
-                            val detector = motionDetectors.getOrPut(camera.id) {
-                                FrameMotionDetector(cooldownMs = 15000L)
-                            }
-                            val result = detector.inspectFrame(
-                                context = applicationContext,
-                                cameraId = camera.id,
-                                cameraName = camera.name,
-                                frameBitmap = sampleBitmap,
-                                notify = false, // Notificamos con ráfaga completa abajo
-                                sensitivity = AppSettings.motionSensitivity
-                            )
-
-                            if (result.isTriggered) {
-                                lastTriggerTimes[camera.id] = now
-                                Log.i(TAG, "¡MOVIMIENTO DETECTADO en ${camera.name}! (${result.percent}% actividad)")
-
-                                // Capturar ráfaga de 4 cuadros posteriores espaciados 200ms para el GIF
-                                val burst = mutableListOf<Bitmap>()
-                                burst.addAll(result.validPreFrames)
-                                burst.add(sampleBitmap)
-
-                                for (step in 1..4) {
-                                    delay(200L)
-                                    val postFrame = fetchCameraSampleFrame(camera)
-                                    if (postFrame != null) {
-                                        burst.add(postFrame)
+                    // Muestrear cámaras en paralelo (máx 4 simultáneas) para evitar que una cámara lenta bloquee a las demás
+                    if (monitoredCameras.isNotEmpty()) {
+                        coroutineScope {
+                            monitoredCameras.map { camera ->
+                                async {
+                                    semaphore.withPermit {
+                                        if (isActive) {
+                                            processCameraMotion(camera)
+                                        }
                                     }
                                 }
-
-                                val aiResult = if (AppSettings.aiDetectionEnabled) {
-                                    CameraAiDetector.analyzeFrame(sampleBitmap)
-                                } else null
-
-                                // Generar GIF, enviar alerta push y respaldar a Telegram automáticamente
-                                CameraMediaEngine.notifyMotionDetected(
-                                    context = applicationContext,
-                                    cameraId = camera.id,
-                                    cameraName = camera.name,
-                                    motionPercent = result.percent,
-                                    rawBitmap = sampleBitmap,
-                                    burstFrames = burst,
-                                    aiDetection = aiResult
-                                )
-                            }
+                            }.awaitAll()
                         }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Error en ciclo de vigilancia en segundo plano", e)
                 }
 
-                // Pausa entre barridos de muestreo (1.5 segundos conserva batería y no satura el Wi-Fi)
                 delay(1500L)
+            }
+        }
+    }
+
+    private suspend fun processCameraMotion(camera: CameraConfig) {
+        if (isSnoozed(camera.id)) return
+        // Si la cámara está abierta/activa en primer plano, UniversalCameraPlayer maneja la detección
+        // para no competir por el mismo socket ni generar falsos positivos de reconexión.
+        if (CameraMediaEngine.isCameraActiveInForeground(camera.id)) {
+            pendingMotionHits.remove(camera.id)
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val lastAlert = lastTriggerTimes[camera.id] ?: 0L
+        if (now - lastAlert < 15_000L) return
+
+        val sampleBitmap = fetchCameraSampleFrame(camera) ?: return
+        val detector = motionDetectors.getOrPut(camera.id) {
+            FrameMotionDetector(cooldownMs = 15_000L)
+        }
+
+        val lastSample = lastSampleTimes[camera.id] ?: 0L
+        if (lastSample > 0L && now - lastSample > 10_000L) {
+            detector.reset()
+            pendingMotionHits.remove(camera.id)
+        }
+        lastSampleTimes[camera.id] = now
+
+        val result = detector.inspectFrame(
+            context = applicationContext,
+            cameraId = camera.id,
+            cameraName = camera.name,
+            frameBitmap = sampleBitmap,
+            notify = false,
+            sensitivity = AppSettings.motionSensitivity
+        )
+
+        if (!result.isTriggered) {
+            pendingMotionHits.remove(camera.id)
+            return
+        }
+
+        // Confirmación de 2 cuadros consecutivos dentro de 8s para evitar falsas alarmas por I-frames o brillo inicial
+        val prev = pendingMotionHits[camera.id]
+        val hitCount = if (prev != null && now - prev.second <= 8_000L) prev.first + 1 else 1
+        if (hitCount < 2) {
+            pendingMotionHits[camera.id] = hitCount to now
+            return
+        }
+
+        pendingMotionHits.remove(camera.id)
+        lastTriggerTimes[camera.id] = now
+        Log.i(TAG, "¡MOVIMIENTO CONFIRMADO en ${camera.name}! (${result.percent}% actividad)")
+
+        val burst = mutableListOf<Bitmap>()
+        burst.addAll(result.validPreFrames)
+        burst.add(sampleBitmap)
+
+        for (step in 1..4) {
+            delay(200L)
+            val postFrame = fetchCameraSampleFrame(camera)
+            if (postFrame != null) {
+                burst.add(postFrame)
+            }
+        }
+
+        val aiResult = if (AppSettings.aiDetectionEnabled) {
+            CameraAiDetector.analyzeFrame(sampleBitmap)
+        } else null
+
+        CameraMediaEngine.notifyMotionDetected(
+            context = applicationContext,
+            cameraId = camera.id,
+            cameraName = camera.name,
+            motionPercent = result.percent,
+            rawBitmap = sampleBitmap,
+            burstFrames = burst,
+            aiDetection = aiResult
+        )
+    }
+
+    /**
+     * Bucle independiente para Grabación Continua en Franja Horaria (AutoRecordMode.SCHEDULE).
+     * Graba segmentos MP4 de las cámaras configuradas incluso con la app cerrada y los sube a Telegram.
+     */
+    private fun startScheduledRecordingLoop() {
+        serviceScope.launch {
+            val repository = CameraRepository(applicationContext)
+            try {
+                while (isActive) {
+                    try {
+                        val allCameras = repository.camerasFlow.first()
+                        val now = System.currentTimeMillis()
+                        val insideSchedule = AppSettings.isInsideSchedule(now)
+                        val targetCameras = if (insideSchedule) {
+                            allCameras.filter {
+                                it.autoRecordMode == AutoRecordMode.SCHEDULE &&
+                                    !CameraMediaEngine.isCameraActiveInForeground(it.id)
+                            }
+                        } else {
+                            emptyList()
+                        }
+                        val targetIds = targetCameras.map { it.id }.toSet()
+                        val segmentDurationMs = AppSettings.scheduleSegmentMinutes.coerceAtLeast(1) * 60_000L
+
+                        // Detener sesiones que salieron de horario, pasaron a primer plano o cumplieron duración de segmento
+                        val toStop = scheduledRecorders.entries.filter { (camId, session) ->
+                            camId !in targetIds || (now - session.startedAtMs >= segmentDurationMs)
+                        }.map { it.key }
+
+                        for (camId in toStop) {
+                            val session = scheduledRecorders.remove(camId) ?: continue
+                            val elapsed = now - session.startedAtMs
+                            withContext(Dispatchers.IO) {
+                                session.recorder.stopAndSaveToGallery(
+                                    sendToTelegram = elapsed >= 3_000L,
+                                    captionLabel = "Grabación Continua (Franja Horaria)"
+                                )
+                            }
+                        }
+
+                        // Iniciar nuevas sesiones para cámaras en franja horaria
+                        for (camera in targetCameras) {
+                            if (!isActive) break
+                            if (scheduledRecorders.containsKey(camera.id)) continue
+                            val firstFrame = fetchCameraSampleFrame(camera) ?: continue
+                            firstFrame.recycle()
+                            val recorder = LiveMp4VideoRecorder(
+                                context = applicationContext,
+                                cameraName = camera.name,
+                                fps = 2,
+                                bitRate = 800_000
+                            )
+                            val started = recorder.startRecording(
+                                scope = serviceScope,
+                                frameProvider = { null },
+                                onElapsedSeconds = {},
+                                asyncFrameProvider = { fetchCameraSampleFrame(camera) }
+                            )
+                            if (started) {
+                                scheduledRecorders[camera.id] = ScheduledRecSession(
+                                    recorder = recorder,
+                                    startedAtMs = System.currentTimeMillis(),
+                                    cameraName = camera.name
+                                )
+                                Log.i(TAG, "Grabación continua horaria iniciada en segundo plano para ${camera.name}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error en bucle de grabación horaria", e)
+                    }
+                    delay(3000L)
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    val remaining = scheduledRecorders.keys.toList()
+                    for (camId in remaining) {
+                        val session = scheduledRecorders.remove(camId) ?: continue
+                        session.recorder.stopAndSaveToGallery(
+                            sendToTelegram = (System.currentTimeMillis() - session.startedAtMs) >= 3_000L,
+                            captionLabel = "Grabación Continua (Franja Horaria)"
+                        )
+                    }
+                }
             }
         }
     }
@@ -287,53 +428,157 @@ class CameraSurveillanceService : Service() {
         }
 
         for (urlStr in urlsToTry) {
-            try {
-                val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 800
-                    readTimeout = 1200
-                    requestMethod = "GET"
-                    if (camera.username.isNotBlank()) {
-                        val auth = Base64.encodeToString("${camera.username}:${camera.password}".toByteArray(), Base64.NO_WRAP)
-                        setRequestProperty("Authorization", "Basic $auth")
-                    }
-                }
-                conn.connect()
-                if (conn.responseCode in 200..299) {
-                    val input = BufferedInputStream(conn.inputStream, 16384)
-                    val buffer = ByteArrayOutputStream(32768)
-                    var prev = -1
-                    var capturing = false
-                    val maxBytes = 400_000
-                    var total = 0
+            val bmp = fetchHttpJpegWithAuth(urlStr, camera)
+            if (bmp != null) return@withContext bmp
+        }
 
-                    while (total < maxBytes) {
-                        val b = input.read()
-                        if (b == -1) break
-                        total++
-                        if (!capturing) {
-                            if (prev == 0xFF && b == 0xD8) {
-                                capturing = true
-                                buffer.reset()
-                                buffer.write(0xFF)
-                                buffer.write(0xD8)
-                            }
-                        } else {
-                            buffer.write(b)
-                            if (prev == 0xFF && b == 0xD9) {
-                                val bytes = buffer.toByteArray()
-                                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                conn.disconnect()
-                                if (bmp != null) return@withContext bmp
-                                break
-                            }
-                        }
-                        prev = b
+        // Fallback RTSP para cámaras Hikvision/EZVIZ/Dahua/RTSP que no exponen snapshot HTTP
+        if (camera.brand != CameraBrand.V380_PRO && camera.brand != CameraBrand.V720_NAXCLOW) {
+            val cooldownUntil = rtspCooldownUntilMs[camera.id] ?: 0L
+            if (System.currentTimeMillis() >= cooldownUntil) {
+                val rtspUrl = camera.buildStreamUrl(useSubStream = true)
+                if (rtspUrl.startsWith("rtsp://", ignoreCase = true)) {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(rtspUrl, emptyMap())
+                        val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        if (frame != null) return@withContext frame
+                    } catch (_: Exception) {
+                        rtspCooldownUntilMs[camera.id] = System.currentTimeMillis() + 20_000L
+                    } finally {
+                        try {
+                            retriever.release()
+                        } catch (_: Exception) {}
                     }
                 }
-                conn.disconnect()
-            } catch (_: Exception) {}
+            }
         }
         null
+    }
+
+    private fun fetchHttpJpegWithAuth(urlStr: String, camera: CameraConfig): Bitmap? {
+        var conn: HttpURLConnection? = null
+        try {
+            val url = URL(urlStr)
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 900
+                readTimeout = 1300
+                requestMethod = "GET"
+                if (camera.username.isNotBlank()) {
+                    val auth = Base64.encodeToString("${camera.username}:${camera.password}".toByteArray(), Base64.NO_WRAP)
+                    setRequestProperty("Authorization", "Basic $auth")
+                }
+            }
+            conn.connect()
+
+            if (conn.responseCode == 401 && camera.username.isNotBlank()) {
+                val wwwAuth = conn.getHeaderField("WWW-Authenticate")
+                conn.disconnect()
+                conn = null
+                if (wwwAuth != null && wwwAuth.startsWith("Digest", ignoreCase = true)) {
+                    val uriPath = url.file.ifBlank { "/" }
+                    val digestHeader = buildDigestAuthHeader(
+                        wwwAuth = wwwAuth,
+                        username = camera.username,
+                        password = camera.password,
+                        method = "GET",
+                        uri = uriPath
+                    )
+                    if (digestHeader != null) {
+                        conn = (url.openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 900
+                            readTimeout = 1300
+                            requestMethod = "GET"
+                            setRequestProperty("Authorization", digestHeader)
+                        }
+                        conn.connect()
+                    }
+                }
+            }
+
+            if (conn != null && conn.responseCode in 200..299) {
+                val input = BufferedInputStream(conn.inputStream, 16384)
+                val buffer = ByteArrayOutputStream(32768)
+                var prev = -1
+                var capturing = false
+                val maxBytes = 400_000
+                var total = 0
+
+                while (total < maxBytes) {
+                    val b = input.read()
+                    if (b == -1) break
+                    total++
+                    if (!capturing) {
+                        if (prev == 0xFF && b == 0xD8) {
+                            capturing = true
+                            buffer.reset()
+                            buffer.write(0xFF)
+                            buffer.write(0xD8)
+                        }
+                    } else {
+                        buffer.write(b)
+                        if (prev == 0xFF && b == 0xD9) {
+                            val bytes = buffer.toByteArray()
+                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bmp != null) return bmp
+                            break
+                        }
+                    }
+                    prev = b
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            try {
+                conn?.disconnect()
+            } catch (_: Exception) {}
+        }
+        return null
+    }
+
+    private fun buildDigestAuthHeader(
+        wwwAuth: String,
+        username: String,
+        password: String,
+        method: String,
+        uri: String
+    ): String? {
+        fun extractParam(key: String): String? {
+            val regex = Regex("""$key=(?:"([^"]*)"|([^,\s]+))""", RegexOption.IGNORE_CASE)
+            val m = regex.find(wwwAuth) ?: return null
+            return m.groupValues[1].ifEmpty { m.groupValues[2] }
+        }
+        val realm = extractParam("realm") ?: return null
+        val nonce = extractParam("nonce") ?: return null
+        val qop = extractParam("qop")
+        val opaque = extractParam("opaque")
+
+        fun md5(input: String): String {
+            val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray())
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+
+        val ha1 = md5("$username:$realm:$password")
+        val ha2 = md5("$method:$uri")
+        val nc = "00000001"
+        val cnonce = "frcam9f2a1"
+
+        val useAuthQop = qop != null && qop.split(",").any { it.trim().equals("auth", ignoreCase = true) }
+        val response = if (useAuthQop) {
+            md5("$ha1:$nonce:$nc:$cnonce:auth:$ha2")
+        } else {
+            md5("$ha1:$nonce:$ha2")
+        }
+
+        val sb = StringBuilder()
+        sb.append("Digest username=\"$username\", realm=\"$realm\", nonce=\"$nonce\", uri=\"$uri\", response=\"$response\"")
+        if (useAuthQop) {
+            sb.append(", qop=auth, nc=$nc, cnonce=\"$cnonce\"")
+        }
+        if (!opaque.isNullOrBlank()) {
+            sb.append(", opaque=\"$opaque\"")
+        }
+        return sb.toString()
     }
 
     private fun createNotificationChannel() {

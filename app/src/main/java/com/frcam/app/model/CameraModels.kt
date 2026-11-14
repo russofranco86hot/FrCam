@@ -304,7 +304,7 @@ data class CameraConfig(
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
     val audioMutedByDefault: Boolean = true,
-    val motionDetectionEnabled: Boolean = true,
+    val motionDetectionEnabled: Boolean = false,
     val voicePromptsEnabled: Boolean = true,
     val motionTrackingEnabled: Boolean = false,
     val ptzPatrolEnabled: Boolean = false,

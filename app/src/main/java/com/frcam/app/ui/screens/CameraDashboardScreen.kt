@@ -789,20 +789,17 @@ private fun CameraGridTile(
                     .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
                     .background(Color.Black)
             ) {
-                // La vista previa y las alertas de movimiento son independientes:
-                // si hay vigilancia activa (alertas o grabación automática) el video sigue procesándose
-                // por detrás de una tarjeta opaca aunque la vista previa esté desactivada.
+                // La vista previa en vivo solo decodifica video cuando la cámara está visible en pantalla;
+                // si hay vigilancia activa (alertas o grabación horaria) el servicio en segundo plano se encarga.
                 val monitoring = camera.motionDetectionEnabled || camera.autoRecordMode != "OFF"
-                if (camera.liveInDashboard || monitoring) {
+                if (camera.liveInDashboard) {
                     UniversalCameraPlayer(
                         camera = camera,
                         useSubStream = useSubStreamInGrid,
                         isMuted = isMuted,
-                        enablePinchZoom = !isCompact && camera.liveInDashboard,
+                        enablePinchZoom = !isCompact,
                         onUpdateCamera = onUpdateCamera,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer { alpha = if (camera.liveInDashboard) 1f else 0.02f }
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
                 if (!camera.liveInDashboard) {
@@ -839,20 +836,40 @@ private fun CameraGridTile(
                     }
                 }
 
-                // Group badge Top-Left
-                Box(
+                // Group badge + Schedule badge Top-Left
+                Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(6.dp)
-                        .background(Color(0xFF1E293B).copy(alpha = 0.85f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .padding(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = camera.groupName.ifBlank { "Casa" },
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFFF1F5F9)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0xFF1E293B).copy(alpha = 0.85f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = camera.groupName.ifBlank { "Casa" },
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFFF1F5F9)
+                        )
+                    }
+                    if (camera.autoRecordMode == com.frcam.app.data.AutoRecordMode.SCHEDULE) {
+                        Box(
+                            modifier = Modifier
+                                .background(Color(0xFFDC2626).copy(alpha = 0.90f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "REC HORARIO",
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
                 }
 
                 // Brand, Location & PTZ Badge Top-Right

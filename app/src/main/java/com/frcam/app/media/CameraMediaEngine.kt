@@ -46,6 +46,8 @@ import com.frcam.app.data.MotionSensitivity
 import com.frcam.app.ai.CameraAiDetector
 import com.frcam.app.ai.AiDetection
 import com.frcam.app.ai.AiCategory
+import com.frcam.app.backup.TelegramBackupEngine
+import android.util.Log
 
 data class MotionEventRecord(
     val id: String,
@@ -72,6 +74,22 @@ object CameraMediaEngine {
     private const val MOTION_CHANNEL_ID = "frcam_motion_alerts"
     private val _motionEvents = MutableStateFlow<List<MotionEventRecord>>(emptyList())
     val motionEvents: StateFlow<List<MotionEventRecord>> = _motionEvents.asStateFlow()
+
+    private val lastNotifiedByCameraMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val activeForegroundCameras = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun markCameraActiveInForeground(cameraId: String) {
+        activeForegroundCameras[cameraId] = System.currentTimeMillis()
+    }
+
+    fun clearCameraActiveInForeground(cameraId: String) {
+        activeForegroundCameras.remove(cameraId)
+    }
+
+    fun isCameraActiveInForeground(cameraId: String): Boolean {
+        val last = activeForegroundCameras[cameraId] ?: return false
+        return (System.currentTimeMillis() - last) < 5_000L
+    }
 
     fun ensureNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -154,6 +172,13 @@ object CameraMediaEngine {
         burstFrames: List<Bitmap> = emptyList(),
         aiDetection: AiDetection? = null
     ) {
+        val nowMs = System.currentTimeMillis()
+        val prevMs = lastNotifiedByCameraMs[cameraId] ?: 0L
+        if (nowMs - prevMs < 12_000L) {
+            return
+        }
+        lastNotifiedByCameraMs[cameraId] = nowMs
+
         ensureNotificationChannel(context)
 
         val stampedBitmap = stampBitmapWithOverlay(rawBitmap, cameraName)
@@ -679,7 +704,8 @@ class LiveMp4VideoRecorder(
     private val cameraName: String,
     private val width: Int = 1280,
     private val height: Int = 720,
-    private val fps: Int = 12
+    private val fps: Int = 10,
+    private val bitRate: Int = 1_200_000
 ) {
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
@@ -696,7 +722,8 @@ class LiveMp4VideoRecorder(
     fun startRecording(
         scope: CoroutineScope,
         frameProvider: () -> Bitmap?,
-        onElapsedSeconds: (Int) -> Unit
+        onElapsedSeconds: (Int) -> Unit,
+        asyncFrameProvider: (suspend () -> Bitmap?)? = null
     ): Boolean {
         if (isRecording) return false
         return try {
@@ -707,7 +734,7 @@ class LiveMp4VideoRecorder(
 
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, 2_500_000)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
                 setInteger(MediaFormat.KEY_FRAME_RATE, fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
             }
@@ -735,8 +762,12 @@ class LiveMp4VideoRecorder(
 
                 while (isActive && isRecording) {
                     val loopStart = System.currentTimeMillis()
-                    val bmp = withContext(Dispatchers.Main) {
-                        frameProvider()
+                    val bmp = if (asyncFrameProvider != null) {
+                        asyncFrameProvider()
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            frameProvider()
+                        }
                     }
                     if (bmp != null && !bmp.isRecycled) {
                         try {
@@ -765,7 +796,10 @@ class LiveMp4VideoRecorder(
         }
     }
 
-    suspend fun stopAndSaveToGallery(): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun stopAndSaveToGallery(
+        sendToTelegram: Boolean = false,
+        captionLabel: String = "Grabación Continua"
+    ): Result<String> = withContext(Dispatchers.IO) {
         if (!isRecording) {
             return@withContext Result.failure(Exception("No hay grabación activa"))
         }
@@ -837,9 +871,35 @@ class LiveMp4VideoRecorder(
                 values.put(MediaStore.Video.Media.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
             }
+
+            var telegramSuffix = ""
+            if (sendToTelegram &&
+                AppSettings.telegramEnabled &&
+                AppSettings.telegramBotToken.isNotBlank() &&
+                AppSettings.telegramChatId.isNotBlank() &&
+                file.exists() &&
+                file.length() > 1024L
+            ) {
+                val ts = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+                val tgResult = TelegramBackupEngine.sendVideoClip(
+                    botToken = AppSettings.telegramBotToken,
+                    chatId = AppSettings.telegramChatId,
+                    cameraName = cameraName,
+                    videoFile = file,
+                    captionLabel = captionLabel,
+                    timestampStr = ts
+                )
+                telegramSuffix = if (tgResult.isSuccess) {
+                    Log.i("LiveMp4VideoRecorder", "Video enviado a Telegram para $cameraName: $fileName")
+                    " + Telegram"
+                } else {
+                    Log.w("LiveMp4VideoRecorder", "Error enviando video a Telegram: ${tgResult.exceptionOrNull()?.message}")
+                    " (Telegram falló: ${tgResult.exceptionOrNull()?.message ?: "error"})"
+                }
+            }
             file.delete()
 
-            Result.success("Video guardado en Galería: Movies/FrCam/$fileName")
+            Result.success("Video guardado en Galería: Movies/FrCam/$fileName$telegramSuffix")
         } catch (e: Exception) {
             Result.failure(e)
         }

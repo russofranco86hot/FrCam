@@ -386,11 +386,17 @@ fun AppSettingsDialog(
                                     onClick = {
                                         segmentMinutes = min
                                         AppSettings.updateScheduleSegmentMinutes(min)
+                                        CameraSurveillanceService.startOrUpdate(context)
                                     },
                                     label = { Text("${min} min", fontSize = 10.sp) }
                                 )
                             }
                         }
+                        Text(
+                            text = "Los segmentos MP4 se guardan en Movies/FrCam y se respaldan automáticamente en Telegram al finalizar cada bloque.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8)
+                        )
                     }
                 }
 
