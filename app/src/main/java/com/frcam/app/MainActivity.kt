@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.frcam.app.data.AppSettings
 import com.frcam.app.media.CameraMediaEngine
 import com.frcam.app.model.CameraBrand
@@ -40,7 +41,11 @@ import com.frcam.app.ui.screens.SingleCameraDetailScreen
 import com.frcam.app.ui.theme.FrCamTheme
 import com.frcam.app.viewmodel.CameraViewModel
 import com.frcam.app.wear.PhoneWearSyncEngine
+import com.google.android.gms.tasks.Tasks
 import com.google.android.gms.wearable.MessageClient
+import com.google.android.gms.wearable.Wearable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -51,9 +56,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        try {
-            com.frcam.app.wear.FrCamPhoneBridgeService.start(this)
-        } catch (_: Exception) {}
+        acquireWifiMulticastLock()
+        // Solo iniciar el bridge de Wear OS si realmente hay un reloj conectado
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val nodes = Tasks.await(Wearable.getNodeClient(this@MainActivity).connectedNodes)
+                if (nodes.isNotEmpty()) {
+                    com.frcam.app.wear.FrCamPhoneBridgeService.start(this@MainActivity)
+                }
+            } catch (_: Exception) {}
+        }
         PhoneWearSyncEngine.onToggleMotion = { id, enabled, recordMode ->
             viewModel.toggleMotionDetection(id, enabled, recordMode)
         }
@@ -65,6 +77,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         wearMessageListener?.let { PhoneWearSyncEngine.unregisterListener(this, it) }
         wearMessageListener = null
+        releaseWifiMulticastLock()
         super.onStop()
     }
 
@@ -78,7 +91,6 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         AppSettings.init(this)
-        acquireWifiMulticastLock()
 
         handleNotificationIntent(intent)
 
@@ -119,6 +131,8 @@ class MainActivity : ComponentActivity() {
                     val hasSchedule = cameras.any { it.autoRecordMode == com.frcam.app.data.AutoRecordMode.SCHEDULE }
                     if (hasMotion || hasSchedule) {
                         com.frcam.app.service.CameraSurveillanceService.startOrUpdate(this@MainActivity)
+                    } else {
+                        com.frcam.app.service.CameraSurveillanceService.stop(this@MainActivity)
                     }
                 }
                 val gridMode by viewModel.gridMode.collectAsState()
@@ -499,22 +513,27 @@ class MainActivity : ComponentActivity() {
 
     private fun acquireWifiMulticastLock() {
         try {
+            if (multicastLock?.isHeld == true) return
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             multicastLock = wifiManager?.createMulticastLock("FrCamOnvifDiscoveryLock")?.apply {
-                setReferenceCounted(true)
+                setReferenceCounted(false)
                 acquire()
             }
         } catch (_: Exception) {
         }
     }
 
-    override fun onDestroy() {
+    private fun releaseWifiMulticastLock() {
         try {
             if (multicastLock?.isHeld == true) {
                 multicastLock?.release()
             }
         } catch (_: Exception) {
         }
+    }
+
+    override fun onDestroy() {
+        releaseWifiMulticastLock()
         super.onDestroy()
     }
 }

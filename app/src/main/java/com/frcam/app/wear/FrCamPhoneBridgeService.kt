@@ -6,10 +6,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.frcam.app.R
@@ -44,34 +42,14 @@ class FrCamPhoneBridgeService : Service() {
         }
     }
 
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
-
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Iniciando FrCamPhoneBridgeService (Foreground Service)...")
+        Log.d(TAG, "Iniciando FrCamPhoneBridgeService (sin WakeLock/WifiLock permanentes)...")
         createNotificationChannel()
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
 
-        // Adquirir WakeLock y WifiLock para evitar que Android Doze mate los sockets en reposo
-        try {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "frcam:bridge_wakelock").apply {
-                setReferenceCounted(false)
-                acquire(12 * 60 * 60 * 1000L) // 12 horas máximo
-            }
-        } catch (_: Exception) {}
-
-        try {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "frcam:bridge_wifilock").apply {
-                setReferenceCounted(false)
-                acquire()
-            }
-        } catch (_: Exception) {}
-
-        // Iniciar el servidor LAN HTTP + UDP en el celular
+        // Iniciar el servidor LAN HTTP + UDP en el celular sin bloquear el ahorro de energía
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val repo = CameraRepository(applicationContext)
@@ -84,12 +62,10 @@ class FrCamPhoneBridgeService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        try { wakeLock?.release() } catch (_: Exception) {}
-        try { wifiLock?.release() } catch (_: Exception) {}
         super.onDestroy()
     }
 

@@ -108,38 +108,29 @@ class CameraSurveillanceService : Service() {
     )
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
+    @Volatile
+    private var cachedCameras: List<CameraConfig> = emptyList()
     private val motionDetectors = ConcurrentHashMap<String, FrameMotionDetector>()
     private val lastTriggerTimes = ConcurrentHashMap<String, Long>()
     private val lastSampleTimes = ConcurrentHashMap<String, Long>()
     private val pendingMotionHits = ConcurrentHashMap<String, Pair<Int, Long>>()
     private val scheduledRecorders = ConcurrentHashMap<String, ScheduledRecSession>()
     private val rtspCooldownUntilMs = ConcurrentHashMap<String, Long>()
+    private val cameraFailBackoffUntilMs = ConcurrentHashMap<String, Long>()
+    private val cameraConsecutiveFails = ConcurrentHashMap<String, Int>()
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Iniciando CameraSurveillanceService en primer plano...")
+        Log.d(TAG, "Iniciando CameraSurveillanceService en modo ahorro de energía...")
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Iniciando vigilancia de cámaras..."))
 
-        try {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "frcam:surveillance_wakelock").apply {
-                acquire(24 * 60 * 60 * 1000L) // 24 horas máximo de salvaguarda
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "No se pudo adquirir WakeLock: ${e.message}")
-        }
-
-        try {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            @Suppress("DEPRECATION")
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "frcam:surveillance_wifilock").apply {
-                acquire()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "No se pudo adquirir WifiLock: ${e.message}")
+        serviceScope.launch {
+            try {
+                CameraRepository(applicationContext).camerasFlow.collect { list ->
+                    cachedCameras = list
+                }
+            } catch (_: Exception) {}
         }
 
         startMonitoringLoop()
@@ -156,45 +147,72 @@ class CameraSurveillanceService : Service() {
         super.onDestroy()
         Log.d(TAG, "Deteniendo CameraSurveillanceService...")
         serviceScope.cancel()
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-            if (wifiLock?.isHeld == true) wifiLock?.release()
-        } catch (_: Exception) {}
+    }
+
+    private inline fun <T> withShortWakeLock(timeoutMs: Long = 15_000L, block: () -> T): T {
+        val wl = try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "frcam:motion_burst").apply {
+                setReferenceCounted(false)
+                acquire(timeoutMs)
+            }
+        } catch (_: Exception) {
+            null
+        }
+        return try {
+            block()
+        } finally {
+            try {
+                if (wl?.isHeld == true) wl.release()
+            } catch (_: Exception) {}
+        }
     }
 
     private fun startMonitoringLoop() {
         serviceScope.launch {
             val repository = CameraRepository(applicationContext)
             val semaphore = Semaphore(4)
+            // Esperar carga inicial de cámaras antes de decidir auto-stop
+            if (cachedCameras.isEmpty()) {
+                cachedCameras = try { repository.camerasFlow.first() } catch (_: Exception) { emptyList() }
+            }
             while (isActive) {
+                var nextDelayMs = 3500L
                 try {
-                    if (!AppSettings.backgroundSurveillanceEnabled) {
-                        updateNotification("Vigilancia en pausa (desactivada en ajustes)")
-                        delay(5000L)
+                    val allCameras = cachedCameras
+                    val monitoredCameras = if (AppSettings.backgroundSurveillanceEnabled) {
+                        allCameras.filter { it.motionDetectionEnabled }
+                    } else {
+                        emptyList()
+                    }
+                    val scheduledCameras = allCameras.filter { it.autoRecordMode == AutoRecordMode.SCHEDULE }
+
+                    if (monitoredCameras.isEmpty() && scheduledCameras.isEmpty() && scheduledRecorders.isEmpty()) {
+                        Log.d(TAG, "Sin cámaras para vigilar ni grabar en horario; deteniendo servicio para ahorrar batería.")
+                        stopSelf()
+                        break
+                    }
+
+                    if (!AppSettings.backgroundSurveillanceEnabled || monitoredCameras.isEmpty()) {
+                        updateNotification("Grabación programada en espera (${scheduledCameras.size} cámara(s))")
+                        delay(15_000L)
                         continue
                     }
 
                     if (!AppSettings.isInsideSurveillanceSchedule()) {
                         updateNotification("Fuera de horario de vigilancia programado")
-                        delay(10000L)
+                        delay(60_000L)
                         continue
                     }
 
-                    val allCameras = repository.camerasFlow.first()
-                    val monitoredCameras = allCameras.filter { it.motionDetectionEnabled }
                     val activeRecCount = scheduledRecorders.size
-
-                    if (monitoredCameras.isEmpty() && activeRecCount == 0) {
-                        updateNotification("Protegiendo 0 cámaras (activa la campana en tus cámaras)")
-                        delay(4000L)
-                        continue
-                    }
-
                     val recSuffix = if (activeRecCount > 0) " • Grabando $activeRecCount en horario" else ""
                     updateNotification("Protegiendo ${monitoredCameras.size} cámara(s)$recSuffix")
 
-                    // Muestrear cámaras en paralelo (máx 4 simultáneas) para evitar que una cámara lenta bloquee a las demás
-                    if (monitoredCameras.isNotEmpty()) {
+                    val allInForeground = monitoredCameras.all { CameraMediaEngine.isCameraActiveInForeground(it.id) }
+                    if (allInForeground) {
+                        nextDelayMs = 10_000L
+                    } else {
                         coroutineScope {
                             monitoredCameras.map { camera ->
                                 async {
@@ -211,7 +229,7 @@ class CameraSurveillanceService : Service() {
                     Log.w(TAG, "Error en ciclo de vigilancia en segundo plano", e)
                 }
 
-                delay(1500L)
+                delay(nextDelayMs)
             }
         }
     }
@@ -226,16 +244,33 @@ class CameraSurveillanceService : Service() {
         }
 
         val now = System.currentTimeMillis()
+        val backoffUntil = cameraFailBackoffUntilMs[camera.id] ?: 0L
+        if (now < backoffUntil) return
+
         val lastAlert = lastTriggerTimes[camera.id] ?: 0L
         if (now - lastAlert < 15_000L) return
 
-        val sampleBitmap = fetchCameraSampleFrame(camera) ?: return
+        val sampleBitmap = fetchCameraSampleFrame(camera)
+        if (sampleBitmap == null) {
+            val fails = (cameraConsecutiveFails[camera.id] ?: 0) + 1
+            cameraConsecutiveFails[camera.id] = fails
+            val backoffMs = when {
+                fails >= 4 -> 60_000L
+                fails >= 2 -> 30_000L
+                else -> 15_000L
+            }
+            cameraFailBackoffUntilMs[camera.id] = now + backoffMs
+            return
+        }
+        cameraConsecutiveFails.remove(camera.id)
+        cameraFailBackoffUntilMs.remove(camera.id)
+
         val detector = motionDetectors.getOrPut(camera.id) {
             FrameMotionDetector(cooldownMs = 15_000L)
         }
 
         val lastSample = lastSampleTimes[camera.id] ?: 0L
-        if (lastSample > 0L && now - lastSample > 10_000L) {
+        if (lastSample > 0L && now - lastSample > 12_000L) {
             detector.reset()
             pendingMotionHits.remove(camera.id)
         }
@@ -252,14 +287,16 @@ class CameraSurveillanceService : Service() {
 
         if (!result.isTriggered) {
             pendingMotionHits.remove(camera.id)
+            sampleBitmap.recycle()
             return
         }
 
-        // Confirmación de 2 cuadros consecutivos dentro de 8s para evitar falsas alarmas por I-frames o brillo inicial
+        // Confirmación de 2 cuadros consecutivos dentro de 10s para evitar falsas alarmas por I-frames o brillo inicial
         val prev = pendingMotionHits[camera.id]
-        val hitCount = if (prev != null && now - prev.second <= 8_000L) prev.first + 1 else 1
+        val hitCount = if (prev != null && now - prev.second <= 10_000L) prev.first + 1 else 1
         if (hitCount < 2) {
             pendingMotionHits[camera.id] = hitCount to now
+            sampleBitmap.recycle()
             return
         }
 
@@ -267,31 +304,33 @@ class CameraSurveillanceService : Service() {
         lastTriggerTimes[camera.id] = now
         Log.i(TAG, "¡MOVIMIENTO CONFIRMADO en ${camera.name}! (${result.percent}% actividad)")
 
-        val burst = mutableListOf<Bitmap>()
-        burst.addAll(result.validPreFrames)
-        burst.add(sampleBitmap)
+        withShortWakeLock(15_000L) {
+            val burst = mutableListOf<Bitmap>()
+            burst.addAll(result.validPreFrames)
+            burst.add(sampleBitmap)
 
-        for (step in 1..4) {
-            delay(200L)
-            val postFrame = fetchCameraSampleFrame(camera)
-            if (postFrame != null) {
-                burst.add(postFrame)
+            for (step in 1..4) {
+                delay(200L)
+                val postFrame = fetchCameraSampleFrame(camera)
+                if (postFrame != null) {
+                    burst.add(postFrame)
+                }
             }
+
+            val aiResult = if (AppSettings.aiDetectionEnabled) {
+                CameraAiDetector.analyzeFrame(sampleBitmap)
+            } else null
+
+            CameraMediaEngine.notifyMotionDetected(
+                context = applicationContext,
+                cameraId = camera.id,
+                cameraName = camera.name,
+                motionPercent = result.percent,
+                rawBitmap = sampleBitmap,
+                burstFrames = burst,
+                aiDetection = aiResult
+            )
         }
-
-        val aiResult = if (AppSettings.aiDetectionEnabled) {
-            CameraAiDetector.analyzeFrame(sampleBitmap)
-        } else null
-
-        CameraMediaEngine.notifyMotionDetected(
-            context = applicationContext,
-            cameraId = camera.id,
-            cameraName = camera.name,
-            motionPercent = result.percent,
-            rawBitmap = sampleBitmap,
-            burstFrames = burst,
-            aiDetection = aiResult
-        )
     }
 
     /**
@@ -300,13 +339,14 @@ class CameraSurveillanceService : Service() {
      */
     private fun startScheduledRecordingLoop() {
         serviceScope.launch {
-            val repository = CameraRepository(applicationContext)
             try {
                 while (isActive) {
+                    var nextDelayMs = 3000L
                     try {
-                        val allCameras = repository.camerasFlow.first()
+                        val allCameras = cachedCameras
                         val now = System.currentTimeMillis()
-                        val insideSchedule = AppSettings.isInsideSchedule(now)
+                        val hasAnyScheduled = allCameras.any { it.autoRecordMode == AutoRecordMode.SCHEDULE }
+                        val insideSchedule = hasAnyScheduled && AppSettings.isInsideSchedule(now)
                         val targetCameras = if (insideSchedule) {
                             allCameras.filter {
                                 it.autoRecordMode == AutoRecordMode.SCHEDULE &&
@@ -314,6 +354,9 @@ class CameraSurveillanceService : Service() {
                             }
                         } else {
                             emptyList()
+                        }
+                        if (!hasAnyScheduled || !insideSchedule) {
+                            nextDelayMs = 30_000L
                         }
                         val targetIds = targetCameras.map { it.id }.toSet()
                         val segmentDurationMs = AppSettings.scheduleSegmentMinutes.coerceAtLeast(1) * 60_000L
@@ -364,7 +407,7 @@ class CameraSurveillanceService : Service() {
                     } catch (e: Exception) {
                         Log.w(TAG, "Error en bucle de grabación horaria", e)
                     }
-                    delay(3000L)
+                    delay(nextDelayMs)
                 }
             } finally {
                 withContext(NonCancellable) {
@@ -442,9 +485,10 @@ class CameraSurveillanceService : Service() {
                     try {
                         retriever.setDataSource(rtspUrl, emptyMap())
                         val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        rtspCooldownUntilMs[camera.id] = System.currentTimeMillis() + 6_000L
                         if (frame != null) return@withContext frame
                     } catch (_: Exception) {
-                        rtspCooldownUntilMs[camera.id] = System.currentTimeMillis() + 20_000L
+                        rtspCooldownUntilMs[camera.id] = System.currentTimeMillis() + 60_000L
                     } finally {
                         try {
                             retriever.release()
