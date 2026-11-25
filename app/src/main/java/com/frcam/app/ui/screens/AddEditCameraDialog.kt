@@ -10,7 +10,9 @@ import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -992,6 +994,7 @@ fun LanDiscoveryDialog(
     onSelectDevice: (DiscoveredCameraDevice) -> Unit,
     existingCameraIps: Set<String> = emptySet(),
     onAddDiscoveredCameras: (List<DiscoveredCameraDevice>, String, String, String) -> Unit = { _, _, _, _ -> },
+    onReverifyWithCredentials: (String, String, (Int) -> Unit) -> Unit = { _, _, _ -> },
     waitingCameraAps: List<WaitingCameraAp> = emptyList(),
     isScanningWaiting: Boolean = false,
     isProvisioning: Boolean = false,
@@ -1016,6 +1019,7 @@ fun LanDiscoveryDialog(
     var batchUsername by remember { mutableStateOf("admin") }
     var batchPassword by remember { mutableStateOf("") }
     var batchPasswordVisible by remember { mutableStateOf(false) }
+    var showUnverifiedHttp by remember { mutableStateOf(false) }
 
     // Estados para el aprovisionamiento de cámara nueva a Wi-Fi de casa
     val (savedWifiSsid, savedWifiPass) = remember { CameraProvisioningEngine.getSavedWifiCredentials(context) }
@@ -1311,10 +1315,53 @@ fun LanDiscoveryDialog(
                                     fontSize = 10.sp,
                                     color = Color(0xFF94A3B8)
                                 )
+                                val blockedCount = discoveredDevices.count {
+                                    it.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.AUTH_REQUIRED ||
+                                        it.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.DETECTED
+                                }
+                                if (blockedCount > 0) {
+                                    FilledTonalButton(
+                                        onClick = {
+                                            onReverifyWithCredentials(batchUsername.trim(), batchPassword) { ready ->
+                                                Toast.makeText(
+                                                    context,
+                                                    "Verificación lista: $ready cámara(s) listas para ver",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        },
+                                        enabled = !isScanning,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(15.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Probar clave en $blockedCount cámara(s) bloqueada(s)",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
                             }
                         }
 
-                        // Barra de acción: Agregar Todas y Elegir Varias
+                        val verifiedNew = discoveredDevices.filter { dev ->
+                            dev.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED &&
+                                !existingCameraIps.contains(dev.ipAddress) &&
+                                !localAddedIps.contains(dev.ipAddress)
+                        }
+                        val hiddenHttpCount = discoveredDevices.count {
+                            it.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.UNVERIFIED_HTTP
+                        }
+                        val visibleDevices = if (showUnverifiedHttp || hiddenHttpCount == discoveredDevices.size) {
+                            discoveredDevices
+                        } else {
+                            discoveredDevices.filter {
+                                it.verificationStatus != com.frcam.app.model.DiscoveryVerificationStatus.UNVERIFIED_HTTP
+                            }
+                        }
+
+                        // Barra de acción: Auto-Agregar Listas / Agregar Todas y Elegir Varias
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1322,25 +1369,33 @@ fun LanDiscoveryDialog(
                         ) {
                             Button(
                                 onClick = {
-                                    val toAdd = discoveredDevices.filter { dev ->
-                                        !existingCameraIps.contains(dev.ipAddress) && !localAddedIps.contains(dev.ipAddress)
-                                    }.ifEmpty { discoveredDevices }
+                                    val toAdd = if (verifiedNew.isNotEmpty()) {
+                                        verifiedNew
+                                    } else {
+                                        visibleDevices.filter { dev ->
+                                            !existingCameraIps.contains(dev.ipAddress) && !localAddedIps.contains(dev.ipAddress)
+                                        }.ifEmpty { visibleDevices }
+                                    }
                                     onAddDiscoveredCameras(toAdd, selectedTargetGroup, batchUsername.trim(), batchPassword)
                                     localAddedIps = localAddedIps + toAdd.map { it.ipAddress }
                                     Toast.makeText(context, "Se agregaron ${toAdd.size} cámara(s) a '$selectedTargetGroup'", Toast.LENGTH_SHORT).show()
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                                modifier = Modifier.weight(1.3f)
+                                modifier = Modifier.weight(1.35f)
                             ) {
                                 Icon(Icons.Default.AddCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Agregar Todas (${discoveredDevices.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = if (verifiedNew.isNotEmpty()) "Auto-Agregar Listas (${verifiedNew.size})" else "Agregar Todas (${visibleDevices.size})",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
 
                             OutlinedButton(
                                 onClick = {
                                     if (isMultiSelectMode) {
-                                        val toAdd = discoveredDevices.filter { selectedForBatch.contains(it.ipAddress) }
+                                        val toAdd = visibleDevices.filter { selectedForBatch.contains(it.ipAddress) }
                                         if (toAdd.isNotEmpty()) {
                                             onAddDiscoveredCameras(toAdd, selectedTargetGroup, batchUsername.trim(), batchPassword)
                                             localAddedIps = localAddedIps + toAdd.map { it.ipAddress }
@@ -1354,7 +1409,7 @@ fun LanDiscoveryDialog(
                                         isMultiSelectMode = true
                                     }
                                 },
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier.weight(0.95f)
                             ) {
                                 Text(
                                     if (isMultiSelectMode) "Guardar (${selectedForBatch.size})" else "Elegir Varias",
@@ -1363,16 +1418,52 @@ fun LanDiscoveryDialog(
                             }
                         }
 
+                        if (hiddenHttpCount > 0 && hiddenHttpCount < discoveredDevices.size) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showUnverifiedHttp = !showUnverifiedHttp }
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = if (showUnverifiedHttp) "Ocultar $hiddenHttpCount dispositivo(s) HTTP genéricos"
+                                    else "Se ocultaron $hiddenHttpCount dispositivo(s) HTTP que no parecen cámara (toca para ver)",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            discoveredDevices.forEach { dev ->
+                            visibleDevices.forEach { dev ->
                                 val isAdded = existingCameraIps.contains(dev.ipAddress) || localAddedIps.contains(dev.ipAddress)
                                 val isSelected = selectedForBatch.contains(dev.ipAddress)
+                                val statusColor = when (dev.verificationStatus) {
+                                    com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED -> Color(0xFF10B981)
+                                    com.frcam.app.model.DiscoveryVerificationStatus.AUTH_REQUIRED -> Color(0xFFF59E0B)
+                                    com.frcam.app.model.DiscoveryVerificationStatus.DETECTED -> Color(0xFF38BDF8)
+                                    com.frcam.app.model.DiscoveryVerificationStatus.UNVERIFIED_HTTP -> Color(0xFF64748B)
+                                }
+                                val statusBadge = when (dev.verificationStatus) {
+                                    com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED ->
+                                        if (dev.verifiedCodec.isNotBlank()) "LISTA • ${dev.verifiedCodec}" else "LISTA PARA VER"
+                                    com.frcam.app.model.DiscoveryVerificationStatus.AUTH_REQUIRED -> "REQUIERE CLAVE"
+                                    com.frcam.app.model.DiscoveryVerificationStatus.DETECTED -> "DETECTADA"
+                                    com.frcam.app.model.DiscoveryVerificationStatus.UNVERIFIED_HTTP -> "HTTP GENÉRICO"
+                                }
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .border(
+                                            width = if (dev.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED) 1.dp else 0.5.dp,
+                                            color = if (isSelected) Color(0xFF38BDF8) else statusColor.copy(alpha = 0.45f),
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
                                         .clickable {
                                             if (isMultiSelectMode) {
                                                 selectedForBatch = if (isSelected) selectedForBatch - dev.ipAddress else selectedForBatch + dev.ipAddress
@@ -1408,21 +1499,47 @@ fun LanDiscoveryDialog(
                                             Icon(
                                                 imageVector = Icons.Default.Router,
                                                 contentDescription = null,
-                                                tint = if (isAdded) Color(0xFF10B981) else Color(0xFF38BDF8),
+                                                tint = if (isAdded) Color(0xFF10B981) else statusColor,
                                                 modifier = Modifier.size(22.dp)
                                             )
                                             Spacer(modifier = Modifier.width(10.dp))
-                                            Column {
+                                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .background(statusColor.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = statusBadge,
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = statusColor
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = dev.ipAddress,
+                                                        fontSize = 10.sp,
+                                                        color = Color(0xFF94A3B8)
+                                                    )
+                                                }
                                                 Text(
                                                     text = dev.deviceName,
                                                     fontWeight = FontWeight.Bold,
                                                     fontSize = 13.sp,
-                                                    color = Color.White
+                                                    color = Color.White,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
                                                 )
                                                 Text(
-                                                    text = "${dev.detectedBrand.displayName} • ${dev.macOrHardwareInfo}",
-                                                    fontSize = 11.sp,
-                                                    color = Color(0xFF94A3B8)
+                                                    text = dev.verificationNote.ifBlank { "${dev.detectedBrand.displayName} • ${dev.macOrHardwareInfo}" },
+                                                    fontSize = 10.sp,
+                                                    color = Color(0xFF94A3B8),
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
                                                 )
                                             }
                                         }

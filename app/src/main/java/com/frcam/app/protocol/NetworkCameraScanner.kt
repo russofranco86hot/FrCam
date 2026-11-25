@@ -2,6 +2,7 @@ package com.frcam.app.protocol
 
 import com.frcam.app.model.CameraBrand
 import com.frcam.app.model.DiscoveredCameraDevice
+import com.frcam.app.model.DiscoveryVerificationStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -68,6 +69,7 @@ object NetworkCameraScanner {
      * 3. Fast Concurrent Subnet Port Fingerprinting (Eye4 10554/10080, V380 8800/554, V720 6123/80, Tapo 2020, ONVIF)
      */
     suspend fun scanLocalNetwork(
+        knownCredentials: List<Pair<String, String>> = emptyList(),
         onProgress: (Float, String) -> Unit,
         onDeviceFound: (DiscoveredCameraDevice) -> Unit
     ): List<DiscoveredCameraDevice> = withContext(Dispatchers.IO) {
@@ -75,6 +77,11 @@ object NetworkCameraScanner {
         val subnetPrefix = localIp?.substringBeforeLast(".") ?: "192.168.1"
 
         val discovered = ConcurrentHashMap<String, DiscoveredCameraDevice>()
+        val arpMap = try {
+            BluetoothCameraEngine.getArpTable()
+        } catch (_: Exception) {
+            emptyMap()
+        }
 
         onProgress(0.04f, "Detectando router y gateway UPnP para acceso fuera de casa...")
         val gateway = try {
@@ -84,51 +91,73 @@ object NetworkCameraScanner {
         }
         val gatewayWanIp = gateway?.externalWanIp
 
-        onProgress(0.08f, "Buscando cámaras V380 por broadcast UDP (puerto 10008)...")
-        val v380BroadcastDevices = V380NativeProtocol.discoverLanV380Devices()
-        for (v380 in v380BroadcastDevices) {
-            val dev = DiscoveredCameraDevice(
-                ipAddress = v380.ip,
-                detectedBrand = CameraBrand.V380_PRO,
-                deviceName = "V380 PRO (${v380.deviceId})",
-                openPorts = listOf(8800),
-                rtspPort = 8800,
-                httpPort = 8800,
-                onvifPort = 8899,
-                deviceId = v380.deviceId,
-                suggestedMainPath = "/live/ch00_1",
-                suggestedSubPath = "/live/ch00_0",
-                macOrHardwareInfo = "ID V380: ${v380.deviceId} • MAC: ${v380.mac}",
-                remoteHost = gatewayWanIp.orEmpty()
-            )
-            discovered[v380.ip] = dev
-            onDeviceFound(dev)
-        }
+        onProgress(0.08f, "Buscando V380, Hikvision SADP y Dahua por broadcast UDP...")
+        coroutineScope {
+            val v380Job = async { V380NativeProtocol.discoverLanV380Devices() }
+            val sadpJob = async { SmartCameraProber.discoverHikvisionSadp() }
+            val dahuaJob = async { SmartCameraProber.discoverDahuaUdp() }
+            val eye4Job = async { discoverEye4ViaUdpBroadcast() }
+            val v720Job = async { discoverV720ViaUdpBroadcast() }
 
-        onProgress(0.12f, "Buscando cámaras Eye4 (VStarcam) y V720 por difusión...")
-        val eye4Devices = discoverEye4ViaUdpBroadcast()
-        for (eye4 in eye4Devices) {
-            if (!discovered.containsKey(eye4.ipAddress)) {
-                discovered[eye4.ipAddress] = eye4
-                onDeviceFound(eye4)
+            for (v380 in v380Job.await()) {
+                val dev = DiscoveredCameraDevice(
+                    ipAddress = v380.ip,
+                    detectedBrand = CameraBrand.V380_PRO,
+                    deviceName = "V380 PRO (${v380.deviceId})",
+                    openPorts = listOf(8800),
+                    rtspPort = 8800,
+                    httpPort = 8800,
+                    onvifPort = 8899,
+                    deviceId = v380.deviceId,
+                    macAddress = v380.mac,
+                    suggestedMainPath = "/live/ch00_1",
+                    suggestedSubPath = "/live/ch00_0",
+                    macOrHardwareInfo = "ID V380: ${v380.deviceId} • MAC: ${v380.mac}",
+                    remoteHost = gatewayWanIp.orEmpty(),
+                    verificationStatus = DiscoveryVerificationStatus.VERIFIED,
+                    verifiedUsername = "admin",
+                    verifiedCodec = "H.264/V380",
+                    confidenceScore = 98,
+                    verificationNote = "V380 ID ${v380.deviceId} verificado"
+                )
+                discovered[v380.ip] = dev
+                onDeviceFound(dev)
+            }
+            for (sadp in sadpJob.await()) {
+                if (sadp.ipAddress != localIp && !discovered.containsKey(sadp.ipAddress)) {
+                    val enriched = sadp.copy(remoteHost = gatewayWanIp.orEmpty())
+                    discovered[sadp.ipAddress] = enriched
+                    onDeviceFound(enriched)
+                }
+            }
+            for (dahua in dahuaJob.await()) {
+                if (dahua.ipAddress != localIp && !discovered.containsKey(dahua.ipAddress)) {
+                    val enriched = dahua.copy(remoteHost = gatewayWanIp.orEmpty())
+                    discovered[dahua.ipAddress] = enriched
+                    onDeviceFound(enriched)
+                }
+            }
+            for (eye4 in eye4Job.await()) {
+                if (!discovered.containsKey(eye4.ipAddress)) {
+                    discovered[eye4.ipAddress] = eye4
+                    onDeviceFound(eye4)
+                }
+            }
+            for (v720 in v720Job.await()) {
+                if (!discovered.containsKey(v720.ipAddress)) {
+                    discovered[v720.ipAddress] = v720
+                    onDeviceFound(v720)
+                }
             }
         }
-        val v720Devices = discoverV720ViaUdpBroadcast()
-        for (v720 in v720Devices) {
-            if (!discovered.containsKey(v720.ipAddress)) {
-                discovered[v720.ipAddress] = v720
-                onDeviceFound(v720)
-            }
-        }
 
-        // Consultar tabla ARP para detectar cámaras activas (V720, A9, Beken, Tuya, etc.)
+        // Consultar tabla ARP para detectar cámaras activas (V720, A9, Beken, Tuya, Hikvision, etc.)
         try {
-            val arpTable = BluetoothCameraEngine.getArpTable()
-            for ((arpIp, mac) in arpTable) {
+            for ((arpIp, mac) in arpMap) {
                 if (arpIp.startsWith(subnetPrefix) && arpIp != localIp && !discovered.containsKey(arpIp) && !arpIp.endsWith(".1") && !arpIp.endsWith(".254")) {
-                    val open = probeCameraPorts(arpIp, timeoutMs = 300)
+                    val open = probeCameraPorts(arpIp, timeoutMs = 260)
                     if (open.isNotEmpty()) {
-                        val dev = classifyDevice(arpIp, open, null, gatewayWanIp)
+                        val dev = classifyDevice(arpIp, open, null, gatewayWanIp).copy(macAddress = mac)
                         discovered[arpIp] = dev
                         onDeviceFound(dev)
                     }
@@ -136,31 +165,32 @@ object NetworkCameraScanner {
             }
         } catch (_: Exception) {}
 
-        onProgress(0.15f, "Enviando sonda UDP ONVIF WS-Discovery en $subnetPrefix.0/24...")
+        onProgress(0.16f, "Enviando sonda ONVIF WS-Discovery y SSDP en $subnetPrefix.0/24...")
         val onvifMap = discoverOnvifViaUdpMulticast()
 
         for ((ip, serviceUrl) in onvifMap) {
             if (ip == localIp || discovered.containsKey(ip)) continue
             val openPorts = probeCameraPorts(ip, timeoutMs = 260)
             val device = classifyDevice(ip, openPorts, serviceUrl, gatewayWanIp)
+                .copy(macAddress = arpMap[ip].orEmpty())
             discovered[ip] = device
             onDeviceFound(device)
         }
 
-        onProgress(0.19f, "Buscando dispositivos SSDP/UPnP (Hikvision, Dahua, Foscam, Axis, Reolink...)...")
         val ssdpDevices = discoverSsdpCameras()
         for ((ip, info) in ssdpDevices) {
             if (ip == localIp || discovered.containsKey(ip)) continue
-            val ports = probeCameraPorts(ip, timeoutMs = 300)
+            val ports = probeCameraPorts(ip, timeoutMs = 260)
             val dev = classifyDevice(ip, ports, onvifMap[ip], gatewayWanIp)
             val named = dev.copy(
                 deviceName = info.friendlyName.ifBlank { dev.deviceName },
-                macOrHardwareInfo = "SSDP: ${info.summary}"
+                macOrHardwareInfo = "SSDP: ${info.summary}",
+                macAddress = arpMap[ip].orEmpty()
             )
             discovered[ip] = named
             onDeviceFound(named)
         }
-        onProgress(0.22f, "Escaneando puertos Eye4 (10554), V380 (8800), V720 (6123) y RTSP en $subnetPrefix.1-254...")
+        onProgress(0.24f, "Escaneando puertos de cámaras en $subnetPrefix.1-254...")
 
         val semaphore = Semaphore(48)
         var completedHosts = 0
@@ -173,12 +203,10 @@ object NetworkCameraScanner {
                         completedHosts++
                         return@async
                     }
-                    // Excluir la IP de administración web del Router / Gateway doméstico (ej. 192.168.1.1 o .254)
                     val isRouterGateway = ip.endsWith(".1") || ip.endsWith(".254") || ip == gatewayWanIp
                     semaphore.withPermit {
                         val openPorts = probeCameraPorts(ip, timeoutMs = 220)
                         if (openPorts.isNotEmpty()) {
-                            // Si es el router, solo aceptarlo si tiene explícitamente puertos de video/cámara abiertos (554, 8554, 8800, 10554, 6123)
                             if (isRouterGateway && !openPorts.any { it in listOf(554, 8554, 8800, 10554, 6123, 16123) }) {
                                 completedHosts++
                                 return@withPermit
@@ -197,6 +225,7 @@ object NetworkCameraScanner {
 
                                 if (validDevice) {
                                     val device = classifyDevice(ip, openPorts, onvifMap[ip], gatewayWanIp)
+                                        .copy(macAddress = arpMap[ip].orEmpty())
                                     discovered[ip] = device
                                     onDeviceFound(device)
                                 }
@@ -204,10 +233,10 @@ object NetworkCameraScanner {
                         }
                     }
                     completedHosts++
-                    if (completedHosts % 15 == 0) {
-                        val fraction = 0.22f + (completedHosts / 254f) * 0.76f
+                    if (completedHosts % 18 == 0) {
+                        val fraction = 0.24f + (completedHosts / 254f) * 0.56f
                         onProgress(
-                            fraction.coerceAtMost(0.98f),
+                            fraction.coerceAtMost(0.80f),
                             "Escaneando $subnetPrefix.$completedHosts (${discovered.size} encontradas)..."
                         )
                     }
@@ -216,10 +245,79 @@ object NetworkCameraScanner {
             jobs.awaitAll()
         }
 
-        onProgress(1.0f, "Escaneo completado: ${discovered.size} cámara(s) detectada(s)")
-        discovered.values.sortedBy {
-            it.ipAddress.substringAfterLast(".").toIntOrNull() ?: 999
+        // Fase inteligente: verificar streams RTSP/ONVIF/HTTP y auto-probar credenciales en paralelo
+        if (discovered.isNotEmpty()) {
+            onProgress(0.84f, "Verificando video, ONVIF y credenciales en ${discovered.size} cámara(s)...")
+            val probeSem = Semaphore(12)
+            coroutineScope {
+                discovered.values.toList().map { dev ->
+                    async {
+                        probeSem.withPermit {
+                            val verified = SmartCameraProber.probeAndVerifyDevice(
+                                device = dev,
+                                knownCredentials = knownCredentials,
+                                macAddress = dev.macAddress.ifBlank { arpMap[dev.ipAddress].orEmpty() }
+                            )
+                            discovered[verified.ipAddress] = verified
+                            onDeviceFound(verified)
+                        }
+                    }
+                }.awaitAll()
+            }
         }
+
+        val sorted = sortDiscoveredDevices(discovered.values.toList())
+        val readyCount = sorted.count { it.verificationStatus == DiscoveryVerificationStatus.VERIFIED }
+        val authCount = sorted.count { it.verificationStatus == DiscoveryVerificationStatus.AUTH_REQUIRED }
+        onProgress(
+            1.0f,
+            "Completado: ${sorted.size} cámara(s) • $readyCount listas para ver, $authCount requieren clave"
+        )
+        sorted
+    }
+
+    /**
+     * Re-verifica en paralelo un conjunto de cámaras descubiertas usando una credencial ingresada por el usuario.
+     */
+    suspend fun reprobeDevicesWithCredentials(
+        devices: List<DiscoveredCameraDevice>,
+        username: String,
+        password: String
+    ): List<DiscoveredCameraDevice> = withContext(Dispatchers.IO) {
+        val creds = listOf(username.trim() to password)
+        val sem = Semaphore(12)
+        val updated = coroutineScope {
+            devices.map { dev ->
+                async {
+                    if (dev.verificationStatus == DiscoveryVerificationStatus.VERIFIED) {
+                        dev
+                    } else {
+                        sem.withPermit {
+                            SmartCameraProber.probeAndVerifyDevice(
+                                device = dev,
+                                knownCredentials = creds,
+                                macAddress = dev.macAddress
+                            )
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+        sortDiscoveredDevices(updated)
+    }
+
+    private fun sortDiscoveredDevices(list: List<DiscoveredCameraDevice>): List<DiscoveredCameraDevice> {
+        fun statusOrder(s: DiscoveryVerificationStatus): Int = when (s) {
+            DiscoveryVerificationStatus.VERIFIED -> 0
+            DiscoveryVerificationStatus.AUTH_REQUIRED -> 1
+            DiscoveryVerificationStatus.DETECTED -> 2
+            DiscoveryVerificationStatus.UNVERIFIED_HTTP -> 3
+        }
+        return list.sortedWith(
+            compareBy<DiscoveredCameraDevice> { statusOrder(it.verificationStatus) }
+                .thenByDescending { it.confidenceScore }
+                .thenBy { it.ipAddress.substringAfterLast(".").toIntOrNull() ?: 999 }
+        )
     }
 
     fun discoverEye4ViaUdpBroadcast(): List<DiscoveredCameraDevice> {

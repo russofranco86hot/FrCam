@@ -164,7 +164,8 @@ fun SingleCameraDetailScreen(
     onFormatSdCard: () -> Unit,
     onReboot: () -> Unit,
     onFactoryReset: () -> Unit,
-    onUpdateCamera: (CameraConfig) -> Unit = {}
+    onUpdateCamera: (CameraConfig) -> Unit = {},
+    onAutoRepairStream: ((String) -> Unit) -> Unit = {}
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -338,6 +339,23 @@ fun SingleCameraDetailScreen(
                                         inputAuthUser = camera.username.ifBlank { "admin" }
                                         inputAuthPass = camera.password
                                         showAuthDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Auto-reparar stream") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Tune,
+                                            contentDescription = null,
+                                            tint = Color(0xFF38BDF8)
+                                        )
+                                    },
+                                    onClick = {
+                                        showDetailMenu = false
+                                        Toast.makeText(context, "Diagnosticando y buscando mejor stream...", Toast.LENGTH_SHORT).show()
+                                        onAutoRepairStream { msg ->
+                                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        }
                                     }
                                 )
                                 DropdownMenuItem(

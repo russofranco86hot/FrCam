@@ -255,6 +255,9 @@ class MainActivity : ComponentActivity() {
                         },
                         onUpdateCamera = { updatedCam ->
                             viewModel.addOrUpdateCamera(updatedCam)
+                        },
+                        onAutoRepairStream = { cb ->
+                            viewModel.autoRepairCameraStream(activeDetailCamera, cb)
                         }
                     )
                 } else {
@@ -343,6 +346,12 @@ class MainActivity : ComponentActivity() {
                         },
                         onUpdateCamera = { updatedCam ->
                             viewModel.addOrUpdateCamera(updatedCam)
+                        },
+                        onArmAll = { armed ->
+                            viewModel.armAllCameras(armed)
+                        },
+                        onSetGroupLive = { grp, active ->
+                            viewModel.setGroupLivePreview(grp, active)
                         }
                     )
                 }
@@ -380,20 +389,38 @@ class MainActivity : ComponentActivity() {
                         existingCameraIps = cameras.map { it.host }.toSet(),
                         onAddDiscoveredCameras = { list, targetGroup, defaultUser, defaultPass ->
                             val configs = list.map { dev ->
+                                val isVerified = dev.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED
+                                val resolvedUser = when {
+                                    isVerified && dev.verifiedUsername.isNotBlank() -> dev.verifiedUsername
+                                    defaultUser.isNotBlank() -> defaultUser
+                                    else -> dev.detectedBrand.defaultUsername
+                                }
+                                val resolvedPass = when {
+                                    isVerified && dev.verifiedPassword.isNotBlank() -> dev.verifiedPassword
+                                    else -> defaultPass
+                                }
                                 viewModel.buildConfigFromDiscovered(
                                     dev,
-                                    username = if (defaultUser.isNotBlank()) defaultUser else dev.detectedBrand.defaultUsername,
-                                    password = defaultPass,
+                                    username = resolvedUser,
+                                    password = resolvedPass,
                                     groupName = targetGroup
                                 )
                             }
                             viewModel.addMultipleCameras(configs)
                         },
+                        onReverifyWithCredentials = { user, pass, onDone ->
+                            viewModel.reverifyDiscoveredWithCredentials(user, pass, onDone)
+                        },
                         onStartScan = { viewModel.startLanDiscovery() },
                         onSelectDevice = { discovered ->
                             showScannerDialog = false
                             viewModel.clearDiagnostic()
-                            editingCamera = viewModel.buildConfigFromDiscovered(discovered)
+                            val isVerified = discovered.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED
+                            editingCamera = viewModel.buildConfigFromDiscovered(
+                                device = discovered,
+                                username = if (isVerified && discovered.verifiedUsername.isNotBlank()) discovered.verifiedUsername else discovered.detectedBrand.defaultUsername,
+                                password = if (isVerified) discovered.verifiedPassword else ""
+                            )
                             showAddEditSheet = true
                         },
                         waitingCameraAps = waitingCameraAps,

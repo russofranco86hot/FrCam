@@ -46,12 +46,22 @@ private val FrCamAmoledColorScheme = FrCamDarkColorScheme.copy(
 object FrColors {
     private val amoled get() = AppSettings.amoled
 
-    val background: Color get() = if (amoled) Color.Black else Color(0xFF090D16)
-    val deepest: Color get() = if (amoled) Color.Black else Color(0xFF070B14)
-    val surface: Color get() = if (amoled) Color.Black else Color(0xFF111827)
-    val surfaceAlt: Color get() = if (amoled) Color(0xFF080808) else Color(0xFF0F172A)
-    val card: Color get() = if (amoled) Color(0xFF0B0B0B) else Color(0xFF141D2F)
-    val cardHigh: Color get() = if (amoled) Color(0xFF141414) else Color(0xFF1E293B)
+    val background: Color get() = if (amoled) Color.Black else Color(0xFF070B14)
+    val deepest: Color get() = if (amoled) Color.Black else Color(0xFF050810)
+    val surface: Color get() = if (amoled) Color.Black else Color(0xFF0F172A)
+    val surfaceAlt: Color get() = if (amoled) Color(0xFF080808) else Color(0xFF0C1322)
+    val card: Color get() = if (amoled) Color(0xFF0C0E12) else Color(0xFF131C2E)
+    val cardHigh: Color get() = if (amoled) Color(0xFF161920) else Color(0xFF1E293B)
+    val border: Color get() = if (amoled) Color(0xFF222630) else Color(0xFF263449)
+    val borderAccent: Color get() = Color(0xFF38BDF8).copy(alpha = 0.55f)
+    val accent: Color get() = Color(0xFF38BDF8)
+    val accentDeep: Color get() = Color(0xFF0284C7)
+    val success: Color get() = Color(0xFF10B981)
+    val warning: Color get() = Color(0xFFF59E0B)
+    val danger: Color get() = Color(0xFFEF4444)
+    val purple: Color get() = Color(0xFFA78BFA)
+    val textPrimary: Color get() = Color(0xFFF8FAFC)
+    val textSecondary: Color get() = Color(0xFF94A3B8)
 }
 
 @Composable

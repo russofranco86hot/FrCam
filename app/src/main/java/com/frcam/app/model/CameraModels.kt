@@ -639,6 +639,13 @@ data class CameraConfig(
     }
 }
 
+enum class DiscoveryVerificationStatus(val label: String) {
+    VERIFIED("Lista para ver"),
+    AUTH_REQUIRED("Requiere clave"),
+    DETECTED("Detectada"),
+    UNVERIFIED_HTTP("Dispositivo HTTP")
+}
+
 data class DiscoveredCameraDevice(
     val ipAddress: String,
     val detectedBrand: CameraBrand,
@@ -655,7 +662,15 @@ data class DiscoveredCameraDevice(
     val remoteHost: String = "",
     val remoteRtspPort: Int = 0,
     val remoteHttpPort: Int = 0,
-    val upnpMapped: Boolean = false
+    val upnpMapped: Boolean = false,
+    val verificationStatus: DiscoveryVerificationStatus = DiscoveryVerificationStatus.DETECTED,
+    val verifiedUsername: String = "",
+    val verifiedPassword: String = "",
+    val verifiedCodec: String = "",
+    val detectedModel: String = "",
+    val macAddress: String = "",
+    val confidenceScore: Int = 50,
+    val verificationNote: String = ""
 )
 
 @Serializable

@@ -162,24 +162,127 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         if (_isScanningLan.value) return
         _isScanningLan.value = true
         _scanProgress.value = 0.02f
-        _scanStatusText.value = "Iniciando escaneo de red Wi-Fi..."
+        _scanStatusText.value = "Iniciando escaneo inteligente de red Wi-Fi..."
         _discoveredDevices.value = emptyList()
+
+        // Reutilizar credenciales de cámaras ya configuradas para verificación automática zero-touch
+        val knownCredentials = cameras.value
+            .filter { it.username.isNotBlank() || it.password.isNotBlank() }
+            .map { it.username.trim() to it.password }
+            .distinct()
 
         viewModelScope.launch {
             try {
                 val results = NetworkCameraScanner.scanLocalNetwork(
+                    knownCredentials = knownCredentials,
                     onProgress = { progress, message ->
                         _scanProgress.value = progress
                         _scanStatusText.value = message
                     },
                     onDeviceFound = { device ->
-                        val updated = (_discoveredDevices.value + device).distinctBy { it.ipAddress }
-                        _discoveredDevices.value = updated
+                        val current = _discoveredDevices.value
+                        val idx = current.indexOfFirst { it.ipAddress == device.ipAddress }
+                        _discoveredDevices.value = if (idx >= 0) {
+                            current.toMutableList().also { it[idx] = device }
+                        } else {
+                            current + device
+                        }
                     }
                 )
                 _discoveredDevices.value = results
             } finally {
                 _isScanningLan.value = false
+            }
+        }
+    }
+
+    fun reverifyDiscoveredWithCredentials(
+        username: String,
+        password: String,
+        onDone: (Int) -> Unit = {}
+    ) {
+        if (_isScanningLan.value || _discoveredDevices.value.isEmpty()) return
+        _isScanningLan.value = true
+        _scanProgress.value = 0.4f
+        _scanStatusText.value = "Probando credenciales en cámaras detectadas..."
+        viewModelScope.launch {
+            try {
+                val updated = NetworkCameraScanner.reprobeDevicesWithCredentials(
+                    devices = _discoveredDevices.value,
+                    username = username,
+                    password = password
+                )
+                _discoveredDevices.value = updated
+                val verifiedCount = updated.count {
+                    it.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED
+                }
+                _scanProgress.value = 1f
+                _scanStatusText.value = "Verificación completada: $verifiedCount cámara(s) listas para ver"
+                onDone(verifiedCount)
+            } finally {
+                _isScanningLan.value = false
+            }
+        }
+    }
+
+    fun autoRepairCameraStream(camera: CameraConfig, onResult: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val host = camera.host.trim()
+                if (host.isBlank() || host == "0.0.0.0") {
+                    onResult("La cámara no tiene IP local asignada para auto-reparar.")
+                    return@launch
+                }
+                val knownCreds = buildList {
+                    if (camera.username.isNotBlank() || camera.password.isNotBlank()) {
+                        add(camera.username.trim() to camera.password)
+                    }
+                    cameras.value.forEach { c ->
+                        if (c.username.isNotBlank() || c.password.isNotBlank()) {
+                            add(c.username.trim() to c.password)
+                        }
+                    }
+                }.distinct()
+
+                val seed = DiscoveredCameraDevice(
+                    ipAddress = host,
+                    detectedBrand = camera.brand,
+                    deviceName = camera.name,
+                    openPorts = listOfNotNull(
+                        camera.rtspPort.takeIf { it > 0 },
+                        camera.httpPort.takeIf { it > 0 },
+                        camera.onvifPort.takeIf { it > 0 },
+                        554, 80
+                    ).distinct(),
+                    rtspPort = camera.rtspPort,
+                    httpPort = camera.httpPort,
+                    onvifPort = camera.onvifPort,
+                    deviceId = camera.deviceId,
+                    suggestedMainPath = camera.mainStreamPath,
+                    suggestedSubPath = camera.subStreamPath
+                )
+                val verified = com.frcam.app.protocol.SmartCameraProber.probeAndVerifyDevice(
+                    device = seed,
+                    knownCredentials = knownCreds
+                )
+                if (verified.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.VERIFIED) {
+                    val repaired = camera.copy(
+                        rtspPort = if (verified.rtspPort > 0) verified.rtspPort else camera.rtspPort,
+                        httpPort = if (verified.httpPort > 0) verified.httpPort else camera.httpPort,
+                        mainStreamPath = verified.suggestedMainPath.ifBlank { camera.mainStreamPath },
+                        subStreamPath = verified.suggestedSubPath.ifBlank { camera.subStreamPath },
+                        username = verified.verifiedUsername.ifBlank { camera.username },
+                        password = if (verified.verifiedPassword.isNotBlank()) verified.verifiedPassword else camera.password
+                    )
+                    addOrUpdateCamera(repaired)
+                    onResult("¡Stream reparado! ${verified.verifiedCodec} en ${repaired.mainStreamPath}")
+                } else if (verified.verificationStatus == com.frcam.app.model.DiscoveryVerificationStatus.AUTH_REQUIRED) {
+                    onResult("Cámara alcanzada en $host, pero rechazó la contraseña. Verifica usuario y clave.")
+                } else {
+                    onResult("No se pudo confirmar un stream activo en $host. Verifica que esté encendida en el mismo Wi-Fi.")
+                }
+            } catch (e: Exception) {
+                onResult("Error al diagnosticar cámara: ${e.message ?: "desconocido"}")
             }
         }
     }
@@ -369,6 +472,26 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleLiveDashboard(camera: CameraConfig, active: Boolean) {
         viewModelScope.launch {
             repository.toggleLiveInDashboard(camera.id, active, cameras.value)
+        }
+    }
+
+    fun armAllCameras(enabled: Boolean) {
+        viewModelScope.launch {
+            val updated = cameras.value.map { cam ->
+                cam.copy(motionDetectionEnabled = enabled)
+            }
+            repository.saveCameras(updated)
+        }
+    }
+
+    fun setGroupLivePreview(groupName: String, active: Boolean) {
+        viewModelScope.launch {
+            val updated = cameras.value.map { cam ->
+                val matches = groupName.equals("Todas", ignoreCase = true) ||
+                    cam.groupName.equals(groupName, ignoreCase = true)
+                if (matches) cam.copy(liveInDashboard = active) else cam
+            }
+            repository.saveCameras(updated)
         }
     }
 
